@@ -1,7 +1,7 @@
-from bs4 import BeautifulSoup
 import pandas as pd
-import logging
+from bs4 import BeautifulSoup
 import re
+import logging
 
 def parse_portfolio_html(file_content):
     """
@@ -18,74 +18,69 @@ def parse_portfolio_html(file_content):
 
     data = []
 
-    # Locate all tables
-    # The structure provided says:
-    # Each investment block starts with:
-    # <table border="1">
-    # ISIN | <ISIN VALUE> | <SCRIPT NAME>
+    current_isin = None
+    current_script = None
+    current_qty = None
 
+    # Locate all tables
     tables = soup.find_all('table')
 
-    # We iterate through tables and look for the specific header pattern
     for table in tables:
         rows = table.find_all('tr')
         if not rows:
             continue
 
-        # Check the first row for ISIN marker
         first_row_cells = rows[0].find_all(['td', 'th'])
-        if len(first_row_cells) < 3:
+        if not first_row_cells:
             continue
 
         first_cell_text = first_row_cells[0].get_text(strip=True)
 
-        if "ISIN" in first_cell_text:
-            isin = first_row_cells[1].get_text(strip=True)
-            script_name = first_row_cells[2].get_text(strip=True)
+        # Check for ISIN Header Table
+        if "ISIN" == first_cell_text and len(first_row_cells) >= 3:
 
-            closing_qty = None
+            # Save previous record if valid
+            if current_isin:
+                if current_qty is not None:
+                     data.append({
+                        'ISIN': current_isin,
+                        'Script Name': current_script,
+                        'Closing Quantity': current_qty
+                    })
+                else:
+                     logging.warning(f"No closing balance found for ISIN: {current_isin}")
 
-            # Find the closing balance
-            # It could be "Closing Balance :" or just "Balance :"
-            # The value is usually in the last cell of that row
+            # Start new record
+            current_isin = first_row_cells[1].get_text(strip=True)
+            current_script = first_row_cells[2].get_text(strip=True)
+            current_qty = None
+            continue
 
-            found_balance = False
-
-            # Iterate backwards through rows to find the balance
-            for row in reversed(rows):
+        # Check for Balance Table associated with current ISIN
+        if current_isin:
+            for row in rows:
                 cells = row.find_all(['td', 'th'])
                 row_text = row.get_text(" ", strip=True)
 
-                # Check for label
+                # Check for "Closing Balance :" or "Balance :"
+                # Be robust about whitespace
                 if "Closing Balance" in row_text or "Balance :" in row_text:
-                    # The value is likely in the last cell
                     if cells:
-                        last_cell_text = cells[-1].get_text(strip=True)
-                        # Clean up value (remove commas)
-                        clean_value = last_cell_text.replace(',', '').strip()
+                        val_text = cells[-1].get_text(strip=True).replace(',', '')
                         try:
-                            closing_qty = float(clean_value)
-                            found_balance = True
-                            break
+                            # Update current_qty.
+                            # We take the float value.
+                            current_qty = float(val_text)
                         except ValueError:
-                            # Try the second to last cell if last one is empty or not a number
-                            if len(cells) > 1:
-                                second_last_text = cells[-2].get_text(strip=True).replace(',', '').strip()
-                                try:
-                                    closing_qty = float(second_last_text)
-                                    found_balance = True
-                                    break
-                                except ValueError:
-                                    pass
+                             pass
 
-            if found_balance:
-                data.append({
-                    'ISIN': isin,
-                    'Script Name': script_name,
-                    'Closing Quantity': closing_qty
-                })
-            else:
-                logging.warning(f"Could not find closing quantity for ISIN: {isin}")
+    # Save the last record after loop finishes
+    if current_isin and current_qty is not None:
+        data.append({
+            'ISIN': current_isin,
+            'Script Name': current_script,
+            'Closing Quantity': current_qty
+        })
 
     df = pd.DataFrame(data)
 
