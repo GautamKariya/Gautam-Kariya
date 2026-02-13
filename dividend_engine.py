@@ -159,6 +159,7 @@ def verify_audit(portfolio_df, client_df, corporate_actions_df):
         search_name = port_script if port_match else base_name
 
         matched_dps = 0.0
+        matched_purposes = []
 
         for ca_row in corp_list:
             if "dividend" in str(ca_row['Purpose']).lower():
@@ -167,6 +168,7 @@ def verify_audit(portfolio_df, client_df, corporate_actions_df):
                     dps = ca_row.get('DPS')
                     if dps is not None and not pd.isna(dps):
                         matched_dps += float(dps)
+                        matched_purposes.append(str(ca_row['Purpose']))
 
         # Calculate Expected
         # Expected = DPS * Portfolio Closing Units (if matched)
@@ -190,6 +192,7 @@ def verify_audit(portfolio_df, client_df, corporate_actions_df):
             dividend_data.append({
                 'ISIN': isin if isin else "",
                 'Investment': base_name,
+                'Dividend Type': ", ".join(matched_purposes),
                 'DPS (Corp)': matched_dps,
                 'Units (Port)': calc_units,
                 'Expected Dividend': expected_div,

@@ -68,38 +68,56 @@ def process_corporate_actions(file, start_date, end_date):
         return df
 
     # Extract DPS
-    def extract_dps(purpose_text):
-        if not isinstance(purpose_text, str):
+    # Priority: 'Amount' column > 'DPS' column > Regex from 'Purpose'
+
+    # Check if 'Amount' column exists (as per user request)
+    amount_col = None
+    for col in df.columns:
+        if col.lower() == 'amount':
+            amount_col = col
+            break
+
+    if amount_col:
+        logging.info(f"Using '{amount_col}' column for DPS extraction.")
+        # Clean and convert Amount column
+        # Handle potential currency symbols or non-numeric characters if any, though screenshot shows clean numbers
+        df['DPS'] = pd.to_numeric(df[amount_col], errors='coerce')
+    else:
+        logging.info("No 'Amount' column found. Falling back to regex extraction from 'Purpose'.")
+
+        def extract_dps_regex(purpose_text):
+            if not isinstance(purpose_text, str):
+                return None
+            # Pattern: look for "Rs. - <amount>" or just number after some text
+            # Example: "Interim Dividend - Rs. - 2.5000"
+
+            # We look for "Rs." or "INR" followed optionally by "-" then the number
+            match = re.search(r'(?:Rs\.?|INR)\s*-?\s*([\d\.]+)', purpose_text, re.IGNORECASE)
+            if match:
+                val_str = match.group(1).rstrip('.') # remove trailing dot if any
+                try:
+                    return float(val_str)
+                except ValueError:
+                    pass
+
+            # Fallback: sometimes it's just "Dividend - 2.50"
+            match = re.search(r'Dividend\s*-\s*([\d\.]+)', purpose_text, re.IGNORECASE)
+            if match:
+                val_str = match.group(1).rstrip('.')
+                try:
+                    return float(val_str)
+                except ValueError:
+                    pass
+
             return None
-        # Pattern: look for "Rs. - <amount>" or just number after some text
-        # Example: "Interim Dividend - Rs. - 2.5000"
-        # Regex to find a float number
 
-        # We look for "Rs." followed optionally by "-" then the number
-        match = re.search(r'(?:Rs\.?|INR)\s*-?\s*([\d\.]+)', purpose_text, re.IGNORECASE)
-        if match:
-            val_str = match.group(1).rstrip('.') # remove trailing dot if any
-            try:
-                return float(val_str)
-            except ValueError:
-                pass
+        df['DPS'] = df['Purpose'].apply(extract_dps_regex)
 
-        # Fallback: sometimes it's just "Dividend - 2.50"
-        match = re.search(r'Dividend\s*-\s*([\d\.]+)', purpose_text, re.IGNORECASE)
-        if match:
-            val_str = match.group(1).rstrip('.')
-            try:
-                return float(val_str)
-            except ValueError:
-                pass
-
-        return None
-
-    df['DPS'] = df['Purpose'].apply(extract_dps)
-
-    # Log rows where DPS could not be extracted
-    # We might want to keep them in exception report later,
-    # but for now we keep them in the DF with NaN DPS so the engine can flag them.
+    # Log rows where DPS could not be extracted/parsed
+    # We keep rows with NaN DPS so the engine can flag them in exceptions if needed,
+    # or filter them out if they are not relevant.
+    # However, the user said "assume it Dividend only ignore other wordings for calculation".
+    # This implies we should trust the Amount if present.
 
     logging.info(f"Processed {len(df)} corporate actions.")
     return df
