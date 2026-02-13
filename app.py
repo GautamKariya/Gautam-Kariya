@@ -65,13 +65,20 @@ def main():
                     st.success(f"Parsed Portfolio HTML: {len(portfolio_df)} ISINs found.")
 
                 # 2. Parse Client Working Files
-                # Need to use temporary storage or byte stream handling in parser
-                # parser expects file-like object. Streamlit uploader is file-like.
-                client_df = parse_client_working_v2(client_curr_file, client_prev_file)
+                try:
+                    client_df = parse_client_working_v2(client_curr_file, client_prev_file)
+                except ValueError as ve:
+                    # Specific parser error
+                    st.error(f"Error Parsing Client Working File: {str(ve)}")
+                    return
+                except Exception as e:
+                    st.error(f"Unexpected Error Parsing Client Working File: {str(e)}")
+                    return
 
                 if client_df.empty:
-                    st.error("Failed to parse Client Working File or 'Shares' sheet empty.")
+                    st.error("Parsed Client Working File but found 0 rows. Check 'Shares' sheet content.")
                     return
+
                 st.success(f"Parsed Client Working: {len(client_df)} rows found.")
                 if client_prev_file:
                     st.info("Previous Quarter file used for dividend isolation.")

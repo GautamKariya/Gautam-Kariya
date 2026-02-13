@@ -13,10 +13,13 @@ def parse_client_working_v2(file, previous_file=None):
 
     Returns:
         pd.DataFrame: Columns ['Investment Name', 'Base Name', 'Closing Units', 'Quarterly Dividend', 'Is Bonus']
+
+    Raises:
+        ValueError: If parsing fails (sheet not found, header not found, columns missing).
     """
     logging.info("Starting Client Working File parsing (v2).")
 
-    def load_shares_sheet(f):
+    def load_shares_sheet(f, file_label="Current File"):
         try:
             xls = pd.ExcelFile(f, engine='openpyxl')
 
@@ -28,13 +31,12 @@ def parse_client_working_v2(file, previous_file=None):
                     break
 
             if not sheet_name:
-                logging.error(f"Sheet 'Shares' not found. Available: {xls.sheet_names}")
-                return pd.DataFrame()
+                raise ValueError(f"Sheet 'SHARES' not found in {file_label}. Available sheets: {xls.sheet_names}")
 
-            # Read first 10 rows to find header
+            # Read first 50 rows to find header
             # Note: We need to handle merged cells or empty cells in header row carefully.
             # Ideally, we read as string to preserve content.
-            df = pd.read_excel(xls, sheet_name=sheet_name, header=None, nrows=10)
+            df = pd.read_excel(xls, sheet_name=sheet_name, header=None, nrows=50)
 
             header_idx = None
             for i, row in df.iterrows():
@@ -49,25 +51,36 @@ def parse_client_working_v2(file, previous_file=None):
                     break
 
             if header_idx is None:
-                logging.error("Header row not found in Shares sheet.")
-                return pd.DataFrame()
+                raise ValueError(f"Header row not found in '{sheet_name}' sheet within first 50 rows (checked for 'Name', 'Investment', 'Closing/Opening').")
 
             # Reload with correct header
             df = pd.read_excel(xls, sheet_name=sheet_name, header=header_idx)
             return df
+
+        except ValueError as ve:
+            logging.error(f"Validation Error in {file_label}: {ve}")
+            raise ve
         except Exception as e:
-            logging.error(f"Error reading Excel: {e}")
-            return pd.DataFrame()
+            logging.error(f"Error reading Excel {file_label}: {e}")
+            raise ValueError(f"Failed to read Excel file {file_label}: {str(e)}")
 
     # Load Current
-    df_curr = load_shares_sheet(file)
+    df_curr = load_shares_sheet(file, "Current Quarter Client Working")
     if df_curr.empty:
-        return df_curr
+        raise ValueError("Parsed 'Shares' sheet is empty.")
 
     # Load Previous (if exists)
     df_prev = pd.DataFrame()
     if previous_file:
-        df_prev = load_shares_sheet(previous_file)
+        try:
+            df_prev = load_shares_sheet(previous_file, "Previous Quarter Client Working")
+        except ValueError as ve:
+            logging.warning(f"Previous file parsing failed: {ve}. Proceeding without previous data.")
+            # Optional: We could raise error or just warn. User said previous is optional.
+            # If they UPLOADED it, they probably expect it to work. Let's warn but continue?
+            # Or raise? Better to raise if the user explicitly provided a file that is invalid.
+            # But strictly speaking, if it fails, we default to Q1 logic.
+            pass
 
     def find_columns(df):
         name_col = None
@@ -116,8 +129,13 @@ def parse_client_working_v2(file, previous_file=None):
     name_col, qty_col, div_col = find_columns(df_curr)
 
     if not all([name_col, qty_col, div_col]):
-        logging.error(f"Missing columns in Current File. Name: {name_col}, Qty: {qty_col}, Div: {div_col}")
-        return pd.DataFrame()
+        missing = []
+        if not name_col: missing.append("Name of Investment")
+        if not qty_col: missing.append("Closing Units")
+        if not div_col: missing.append("Dividend")
+        error_msg = f"Missing required columns in Current File: {', '.join(missing)}"
+        logging.error(error_msg)
+        raise ValueError(error_msg)
 
     # Process Data
     result_data = []
