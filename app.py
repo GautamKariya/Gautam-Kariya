@@ -9,23 +9,23 @@ logging.basicConfig(filename='audit_log.txt', level=logging.INFO, format='%(asct
 
 # Imports
 try:
-    from parser import parse_portfolio_html
+    from parser import parse_portfolio_html_v2
     from corporate_actions import process_corporate_actions
-    from working_parser import parse_working_file
-    from dividend_engine import calculate_dividends, reconcile_holdings
+    from working_parser import parse_client_working_v2
+    from dividend_engine import verify_audit
 except ImportError:
     import sys
     import os
     sys.path.append(os.getcwd())
-    from parser import parse_portfolio_html
+    from parser import parse_portfolio_html_v2
     from corporate_actions import process_corporate_actions
-    from working_parser import parse_working_file
-    from dividend_engine import calculate_dividends, reconcile_holdings
+    from working_parser import parse_client_working_v2
+    from dividend_engine import verify_audit
 
-st.set_page_config(page_title="Quarterly Investment & Corporate Action Audit Tool", layout="wide")
+st.set_page_config(page_title="RPL Investment Report – Shares Audit Verification Tool", layout="wide")
 
 def main():
-    st.title("Quarterly Investment & Corporate Action Audit Tool")
+    st.title("RPL Investment Report – Shares Audit Verification Tool")
 
     st.sidebar.header("Input Parameters")
 
@@ -41,123 +41,139 @@ def main():
 
     # File uploads
     st.sidebar.markdown("---")
-    portfolio_file = st.sidebar.file_uploader("1. Upload NSDL/SHCIL Portfolio HTML", type=["html", "htm"])
+    portfolio_file = st.sidebar.file_uploader("1. Upload Portfolio Statement (HTML)", type=["html", "htm"])
     corporate_file = st.sidebar.file_uploader("2. Upload Corporate Action CSV", type=["csv"])
-    working_file = st.sidebar.file_uploader("3. Upload Working File (Excel)", type=["xlsx", "xls"])
+    client_curr_file = st.sidebar.file_uploader("3. Upload Current Quarter Client Working (Excel)", type=["xlsx", "xls"])
+    client_prev_file = st.sidebar.file_uploader("4. Upload Previous Quarter Client Working (Optional)", type=["xlsx", "xls"])
 
-    if st.sidebar.button("Run Reconciliation"):
-        if portfolio_file and corporate_file and working_file:
+    if st.sidebar.button("Run Verification"):
+        if portfolio_file and corporate_file and client_curr_file:
             st.info("Processing files...")
 
             try:
-                # 1. Parse Portfolio HTML (for Closing Balance verification)
+                # 1. Parse Portfolio HTML
                 portfolio_bytes = portfolio_file.read()
                 try:
                     portfolio_content = portfolio_bytes.decode('utf-8')
                 except UnicodeDecodeError:
                     portfolio_content = portfolio_bytes.decode('latin-1')
 
-                portfolio_df = parse_portfolio_html(portfolio_content)
-                st.success(f"Parsed Portfolio HTML: {len(portfolio_df)} ISINs found.")
+                portfolio_df = parse_portfolio_html_v2(portfolio_content)
+                if portfolio_df.empty:
+                    st.warning("Parsed Portfolio HTML but found 0 ISINs. Check structure.")
+                else:
+                    st.success(f"Parsed Portfolio HTML: {len(portfolio_df)} ISINs found.")
 
-                # 2. Parse Working File Excel (for Script Code & Holdings)
-                working_file_df = parse_working_file(working_file)
-                if working_file_df.empty:
-                    st.error("Failed to parse Working File or no data found in 'Shares' sheet.")
+                # 2. Parse Client Working Files
+                # Need to use temporary storage or byte stream handling in parser
+                # parser expects file-like object. Streamlit uploader is file-like.
+                client_df = parse_client_working_v2(client_curr_file, client_prev_file)
+
+                if client_df.empty:
+                    st.error("Failed to parse Client Working File or 'Shares' sheet empty.")
                     return
-                st.success(f"Parsed Working File: {len(working_file_df)} Scripts found.")
+                st.success(f"Parsed Client Working: {len(client_df)} rows found.")
+                if client_prev_file:
+                    st.info("Previous Quarter file used for dividend isolation.")
+                else:
+                    st.warning("Previous Quarter file NOT provided. Assuming Current Cumulative = Quarterly Dividend.")
 
-                # 3. Process Corporate Actions (for Dividend/Bonus data)
+                # 3. Process Corporate Actions
                 corporate_file.seek(0)
                 corporate_df = process_corporate_actions(corporate_file, start_date, end_date)
                 st.success(f"Processed Corporate Actions: {len(corporate_df)} Dividends/Bonuses found in selected quarter.")
 
-                # 4. Run Reconciliation Logic
-
-                # A. Reconcile Holdings (Working File vs Portfolio HTML)
-                reconciliation_df = reconcile_holdings(portfolio_df, working_file_df)
-
-                # B. Calculate Dividends (Working File vs Corporate Action CSV)
-                dividend_df, exception_df = calculate_dividends(working_file_df, corporate_df)
+                # 4. Run Audit Verification Logic
+                reconciliation_df, dividend_df, bonus_df, exception_df = verify_audit(portfolio_df, client_df, corporate_df)
 
                 # Display Results
-                st.subheader("Reconciliation Dashboard")
+                st.subheader("Audit Dashboard")
 
-                tab1, tab2, tab3, tab4 = st.tabs(["Dividend Working", "Holdings Reconciliation", "Exceptions", "Source Data"])
+                tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                    "Closing Units Reconciliation",
+                    "Dividend Verification",
+                    "Bonus Verification",
+                    "Exception Summary",
+                    "Source Data"
+                ])
 
                 with tab1:
-                    st.write("### Dividend Calculation (Based on Working File & Corp Actions)")
-                    if not dividend_df.empty:
-                        st.dataframe(dividend_df)
-                        total_div = dividend_df['Expected Dividend'].sum()
-                        st.metric("Total Expected Dividend", f"{total_div:,.2f}")
+                    st.write("### Closing Units (Client vs Portfolio)")
+                    if not reconciliation_df.empty:
+                        def highlight_status(row):
+                            return ['background-color: #ffcccc' if row['Status'] != 'Matched' else ''] * len(row)
+                        st.dataframe(reconciliation_df.style.apply(highlight_status, axis=1))
                     else:
-                        st.info("No dividends expected for the matched holdings in this quarter.")
+                        st.info("No data.")
 
                 with tab2:
-                    st.write("### Holdings Reconciliation (Working File vs Portfolio HTML)")
-                    st.write("Matches Script Name from Working File with NSDL Portfolio.")
-                    if not reconciliation_df.empty:
-                        # Highlight mismatches
-                        def highlight_mismatch(row):
-                            color = 'background-color: #ffcccc' if row['Status'] != 'Matched' else ''
-                            return [color] * len(row)
-
-                        st.dataframe(reconciliation_df.style.apply(highlight_mismatch, axis=1))
-
-                        mismatch_count = len(reconciliation_df[reconciliation_df['Status'] != 'Matched'])
-                        if mismatch_count > 0:
-                            st.warning(f"Found {mismatch_count} discrepancies in holdings.")
-                        else:
-                            st.success("All holdings matched successfully!")
+                    st.write("### Dividend Verification")
+                    st.write("Comparison: Expected (DPS * Port Units) vs Client Quarterly Increase")
+                    if not dividend_df.empty:
+                        st.dataframe(dividend_df)
+                        total_expected = dividend_df['Expected Dividend'].sum()
+                        total_client = dividend_df['Client Increase'].sum()
+                        st.metric("Total Expected", f"{total_expected:,.2f}", delta=f"{total_client - total_expected:,.2f}")
                     else:
-                        st.info("No reconciliation data generated.")
+                        st.info("No dividends matched.")
 
                 with tab3:
-                    st.write("### Exception Report")
-                    if not exception_df.empty:
-                        st.dataframe(exception_df)
+                    st.write("### Bonus Verification")
+                    if not bonus_df.empty:
+                        st.dataframe(bonus_df)
                     else:
-                        st.success("No exceptions found.")
+                        st.info("No bonus entries found.")
 
                 with tab4:
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        st.write("#### NSDL Portfolio Data")
-                        st.dataframe(portfolio_df)
-                    with col_b:
-                        st.write("#### Working File Data (Aggregated)")
-                        st.dataframe(working_file_df)
+                    st.write("### Exception Summary")
+                    if not exception_df.empty:
+                        st.error(f"Found {len(exception_df)} exceptions.")
+                        st.dataframe(exception_df)
+                    else:
+                        st.success("No exceptions found!")
+
+                with tab5:
+                     col_a, col_b = st.columns(2)
+                     with col_a:
+                         st.write("#### Parsed Portfolio")
+                         st.dataframe(portfolio_df)
+                     with col_b:
+                         st.write("#### Parsed Client Working")
+                         st.dataframe(client_df)
 
                 # 5. Generate Excel Report
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    if not dividend_df.empty:
-                        dividend_df.to_excel(writer, sheet_name='Dividend Working', index=False)
                     if not reconciliation_df.empty:
-                        reconciliation_df.to_excel(writer, sheet_name='Holdings Reconciliation', index=False)
+                        reconciliation_df.to_excel(writer, sheet_name='Closing Units Reconciliation', index=False)
+                    if not dividend_df.empty:
+                        dividend_df.to_excel(writer, sheet_name='Dividend Verification', index=False)
+                    if not bonus_df.empty:
+                        bonus_df.to_excel(writer, sheet_name='Bonus Verification', index=False)
                     if not exception_df.empty:
-                        exception_df.to_excel(writer, sheet_name='Exceptions', index=False)
+                        exception_df.to_excel(writer, sheet_name='Exception Summary', index=False)
+
+                    # Dump source data for reference
                     if not portfolio_df.empty:
-                        portfolio_df.to_excel(writer, sheet_name='Source - NSDL', index=False)
-                    if not working_file_df.empty:
-                        working_file_df.to_excel(writer, sheet_name='Source - Working File', index=False)
+                        portfolio_df.to_excel(writer, sheet_name='Source - Portfolio', index=False)
+                    if not client_df.empty:
+                        client_df.to_excel(writer, sheet_name='Source - Client', index=False)
 
                 st.download_button(
-                    label="Download Full Reconciliation Report (Excel)",
+                    label="Download Audit Report (Excel)",
                     data=output.getvalue(),
-                    file_name="Audit_Reconciliation_Report.xlsx",
+                    file_name="Audit_Verification_Report.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
-                logging.info("Reconciliation completed successfully.")
+                logging.info("Verification completed successfully.")
 
             except Exception as e:
                 st.error(f"An error occurred: {e}")
-                logging.error(f"Error during reconciliation: {e}", exc_info=True)
+                logging.error(f"Error during verification: {e}", exc_info=True)
 
         else:
-            st.error("Please upload all three required files to proceed.")
+            st.error("Please upload the 3 required files (Portfolio, Corp Action, Current Client Working) to proceed.")
 
 if __name__ == "__main__":
     main()

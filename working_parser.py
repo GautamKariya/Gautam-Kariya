@@ -2,99 +2,145 @@ import pandas as pd
 import logging
 import re
 
-def parse_working_file(file):
+def parse_client_working_v2(file, previous_file=None):
     """
-    Parses the user's Working File (Excel) to extract holdings.
+    Parses the Client Working Excel ("Shares" sheet).
+    Handles Cumulative Dividends by optionally subtracting Previous Quarter values.
 
     Args:
-        file (file-like object): The uploaded Excel file.
+        file: Current Quarter Excel file.
+        previous_file: Previous Quarter Excel file (Optional).
 
     Returns:
-        pd.DataFrame: A DataFrame with aggregated holdings by Script Code.
-                      Columns: ['Script Code', 'Script Name', 'Total Quantity', 'Details']
+        pd.DataFrame: Columns ['Investment Name', 'Base Name', 'Closing Units', 'Quarterly Dividend', 'Is Bonus']
     """
-    try:
-        # Load the Excel file, specifically the "Shares" sheet
-        # Use openpyxl engine
-        xls = pd.ExcelFile(file, engine='openpyxl')
+    logging.info("Starting Client Working File parsing (v2).")
 
-        if "Shares" not in xls.sheet_names:
-            logging.error("Sheet 'Shares' not found in the Working File.")
+    def load_shares_sheet(f):
+        try:
+            xls = pd.ExcelFile(f, engine='openpyxl')
+            if "Shares" not in xls.sheet_names:
+                logging.error("Sheet 'Shares' not found.")
+                return pd.DataFrame()
+
+            # Read first few rows to find header
+            df = pd.read_excel(xls, sheet_name="Shares", header=None)
+
+            header_idx = None
+            for i, row in df.iterrows():
+                row_str = " ".join([str(x) for x in row if pd.notna(x)]).lower()
+                # Look for key columns: "Investment", "Dividend", "Closing" or "Quantity"
+                if "investment" in row_str and "dividend" in row_str:
+                    header_idx = i
+                    break
+
+            if header_idx is None:
+                logging.error("Header row not found in Shares sheet.")
+                return pd.DataFrame()
+
+            df = pd.read_excel(xls, sheet_name="Shares", header=header_idx)
+            return df
+        except Exception as e:
+            logging.error(f"Error reading Excel: {e}")
             return pd.DataFrame()
 
-        df = pd.read_excel(xls, sheet_name="Shares", header=None)
+    # Load Current
+    df_curr = load_shares_sheet(file)
+    if df_curr.empty:
+        return df_curr
 
-        # Locate the header row
-        header_row_idx = None
-        for i, row in df.iterrows():
-            # Convert row to string and check for key columns
-            row_str = " ".join([str(x) for x in row if pd.notna(x)])
-            if "Script code" in row_str and "Name of Investment" in row_str:
-                header_row_idx = i
-                break
+    # Load Previous (if exists)
+    df_prev = pd.DataFrame()
+    if previous_file:
+        df_prev = load_shares_sheet(previous_file)
 
-        if header_row_idx is None:
-            logging.error("Could not find the header row in 'Shares' sheet.")
-            return pd.DataFrame()
+    # Identify Columns in Current
+    # We need: Investment Name, Closing Units, Dividend (Cumulative)
+    name_col = next((c for c in df_curr.columns if "name" in str(c).lower() and "investment" in str(c).lower()), None)
+    qty_col = next((c for c in df_curr.columns if ("closing" in str(c).lower() and "units" in str(c).lower()) or "qty" in str(c).lower() or "quantity" in str(c).lower()), None)
+    div_col = next((c for c in df_curr.columns if "dividend" in str(c).lower()), None)
 
-        # Reload with correct header
-        df = pd.read_excel(xls, sheet_name="Shares", header=header_row_idx)
-
-        # Identify necessary columns
-        script_code_col = None
-        script_name_col = None
-        qty_col = None
-
-        for col in df.columns:
-            col_str = str(col).strip()
-            if "Script code" in col_str:
-                script_code_col = col
-            elif "Name of Investment" in col_str:
-                script_name_col = col
-            elif "Closing" in col_str and "(units)" in col_str:
-                qty_col = col
-
-        if not all([script_code_col, script_name_col, qty_col]):
-            logging.error(f"Missing required columns. Found: Code={script_code_col}, Name={script_name_col}, Qty={qty_col}")
-            return pd.DataFrame()
-
-        # Clean Data
-        df = df[[script_code_col, script_name_col, qty_col]].copy()
-        df.columns = ['Script Code', 'Script Name', 'Quantity']
-
-        # Remove rows where Script Code is NaN or empty
-        df = df.dropna(subset=['Script Code'])
-
-        # Ensure Script Code is treated as integer/string (remove .0 if present)
-        df['Script Code'] = pd.to_numeric(df['Script Code'], errors='coerce').fillna(0).astype(int)
-        df = df[df['Script Code'] > 0] # Filter out 0 or invalid codes
-
-        # Ensure Quantity is numeric
-        df['Quantity'] = pd.to_numeric(df['Quantity'], errors='coerce').fillna(0)
-
-        # Group by Script Code
-        # We want to aggregate Quantity, but keep the first Script Name
-        # We also want to keep a list of 'Details' (e.g. "ONGC", "ONGC (Bonus)") for audit
-
-        def aggregate_details(group):
-            details = []
-            for _, row in group.iterrows():
-                details.append(f"{row['Script Name']} ({row['Quantity']})")
-            return "; ".join(details)
-
-        aggregated = df.groupby('Script Code').agg({
-            'Script Name': 'first',
-            'Quantity': 'sum'
-        }).reset_index()
-
-        # Add details column separately (agg can be tricky with custom functions on multiple cols)
-        # Re-merge details
-        details_series = df.groupby('Script Code').apply(aggregate_details)
-        aggregated['Details'] = aggregated['Script Code'].map(details_series)
-
-        logging.info(f"Successfully parsed {len(aggregated)} unique scripts from Working File.")
-        return aggregated
-
-    except Exception as e:
-        logging.error(f"Error parsing Working File: {e}")
+    if not all([name_col, qty_col, div_col]):
+        logging.error(f"Missing columns. Name: {name_col}, Qty: {qty_col}, Div: {div_col}")
         return pd.DataFrame()
+
+    # Process Data
+    result_data = []
+
+    # Create a map of Previous Cumulative Dividends if available
+    # Map: Base Name -> Dividend Value
+    prev_div_map = {}
+    if not df_prev.empty:
+        # We need to identify columns for prev file too
+        p_name_col = next((c for c in df_prev.columns if "name" in str(c).lower() and "investment" in str(c).lower()), None)
+        p_div_col = next((c for c in df_prev.columns if "dividend" in str(c).lower()), None)
+
+        if p_name_col and p_div_col:
+            for _, row in df_prev.iterrows():
+                raw_name = str(row[p_name_col])
+                # Clean name to get Base Name
+                base_name = raw_name.upper().replace("(BONUS)", "").strip()
+                try:
+                    val = float(row[p_div_col])
+                    # If duplicate base names exist (e.g. bonus rows), usually dividend is on the main row.
+                    # Or if it's cumulative, we might just take the max or first non-zero?
+                    # User said: "Dividend is stored once and increases over time."
+                    # We store it.
+                    if base_name not in prev_div_map:
+                         prev_div_map[base_name] = val
+                    else:
+                        # If we already have it, maybe sum it?
+                        # Or assume it's the same investment split in rows?
+                        # Usually dividend is per script.
+                        # Let's keep the largest value found for that script to be safe (cumulative)
+                        prev_div_map[base_name] = max(prev_div_map[base_name], val)
+                except (ValueError, TypeError):
+                    pass
+
+    for _, row in df_curr.iterrows():
+        raw_name = str(row[name_col])
+        if pd.isna(raw_name) or raw_name.strip() == "":
+            continue
+
+        # 1. Base Name Logic
+        base_name = raw_name.upper().replace("(BONUS)", "").strip()
+        is_bonus = "(BONUS)" in raw_name.upper()
+
+        # 2. Extract Values
+        try:
+            qty = float(row[qty_col])
+        except (ValueError, TypeError):
+            qty = 0.0
+
+        try:
+            curr_cum_div = float(row[div_col])
+        except (ValueError, TypeError):
+            curr_cum_div = 0.0
+
+        # 3. Quarterly Dividend Calculation
+        # Only calculate if it's NOT a bonus row (Bonus rows don't carry dividend usually, but user said "Dividend is stored once")
+        # If this row has dividend, we process it.
+
+        quarterly_div = 0.0
+
+        if curr_cum_div > 0:
+            prev_cum_div = prev_div_map.get(base_name, 0.0)
+            quarterly_div = curr_cum_div - prev_cum_div
+
+            # If negative, something is wrong (maybe sold?), default to 0 or keep negative to flag exception?
+            # User said: "Quarter Dividend = Current Cumulative – Previous Cumulative"
+            # We'll keep it as is.
+
+        result_data.append({
+            'Investment Name': raw_name,
+            'Base Name': base_name,
+            'Closing Units': qty,
+            'Quarterly Dividend': quarterly_div,
+            'Current Cumulative': curr_cum_div,
+            'Previous Cumulative': prev_div_map.get(base_name, 0.0) if prev_div_map else 0.0,
+            'Is Bonus': is_bonus
+        })
+
+    df_result = pd.DataFrame(result_data)
+    logging.info(f"Parsed {len(df_result)} rows from Client Working (v2).")
+    return df_result
