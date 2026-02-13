@@ -12,7 +12,7 @@ def verify_audit(portfolio_df, client_df, corporate_actions_df):
 
     Args:
         portfolio_df: DataFrame (ISIN, Script Name, Closing Quantity)
-        client_df: DataFrame (Investment Name, Base Name, Closing Units, Quarterly Dividend, Is Bonus, Current Cumulative, Previous Cumulative)
+        client_df: DataFrame (ISIN, Investment Name, Base Name, Closing Units, Quarterly Dividend, Is Bonus, Current Cumulative, Previous Cumulative)
         corporate_actions_df: DataFrame (Security Name, Ex Date, Purpose, DPS)
 
     Returns:
@@ -28,6 +28,8 @@ def verify_audit(portfolio_df, client_df, corporate_actions_df):
     # Pre-process Portfolio for easier matching
     # Map: Cleaned Portfolio Script Name -> Row
     port_list = portfolio_df.to_dict('records')
+    # Map: ISIN -> Row
+    port_isin_map = {row['ISIN']: row for row in port_list if pd.notna(row['ISIN']) and str(row['ISIN']).strip() != ""}
 
     # Pre-process Corp Actions for easier matching
     # Map: Cleaned Security Name -> List of Actions
@@ -36,12 +38,25 @@ def verify_audit(portfolio_df, client_df, corporate_actions_df):
     matched_port_indices = set()
 
     # ==========================================
-    # GROUP CLIENT DATA BY BASE NAME
+    # GROUP CLIENT DATA BY ISIN / BASE NAME
     # ==========================================
-    # We reconcile on AGGREGATED Holdings, but keep Dividend info
+    # We reconcile on AGGREGATED Holdings.
+    # Priority for grouping: ISIN. If missing, fallback to Base Name.
+
+    def get_group_key(row):
+        isin = str(row['ISIN']).strip()
+        if isin and isin.upper() != "NAN" and isin != "":
+            return isin
+        return "NAME:" + str(row['Base Name']).strip().upper()
+
+    # Create a temporary column for grouping
+    client_df = client_df.copy()
+    client_df['GroupKey'] = client_df.apply(get_group_key, axis=1)
 
     # Aggregation
-    client_grouped = client_df.groupby('Base Name').agg({
+    client_grouped = client_df.groupby('GroupKey').agg({
+        'ISIN': 'first',
+        'Base Name': 'first',
         'Closing Units': 'sum',
         'Quarterly Dividend': 'sum',
         'Is Bonus': lambda x: any(x), # True if any row is bonus
@@ -53,6 +68,11 @@ def verify_audit(portfolio_df, client_df, corporate_actions_df):
     # ==========================================
 
     for _, group_row in client_grouped.iterrows():
+        isin = group_row['ISIN']
+        # Clean ISIN
+        if pd.isna(isin) or str(isin).strip() == "" or str(isin).lower() == "nan":
+            isin = None
+
         base_name = group_row['Base Name']
         total_client_units = group_row['Closing Units']
         total_q_div = group_row['Quarterly Dividend']
@@ -60,26 +80,43 @@ def verify_audit(portfolio_df, client_df, corporate_actions_df):
         original_names = group_row['Investment Name']
 
         # --- Match with Portfolio ---
-        best_port_match = None
+        port_match = None
+        match_type = "None"
         best_port_score = 0
-        best_port_idx = -1
 
-        for idx, port_row in enumerate(port_list):
-            score = fuzz.token_sort_ratio(str(base_name).lower(), str(port_row['Script Name']).lower())
-            if score > best_port_score:
-                best_port_score = score
-                best_port_match = port_row
-                best_port_idx = idx
+        # 1. Try Exact ISIN Match
+        if isin:
+            if isin in port_isin_map:
+                port_match = port_isin_map[isin]
+                match_type = "ISIN"
+                best_port_score = 100 # Exact match
+            else:
+                match_type = "ISIN (Not Found)"
 
-        # Threshold 80%
+        # 2. If no ISIN (or ISIN lookup failed? No, if ISIN failed we respect it), try Name Match ONLY if ISIN missing
+        # Wait, if ISIN is present but not in Portfolio, it means Portfolio doesn't have it.
+        # We should NOT try to match by name in that case, because ISIN is unique identifier.
+        # Unless the user entered wrong ISIN? But we assume data integrity.
+        # So only try name match if ISIN was None.
+
+        if not isin and not port_match:
+             for idx, port_row in enumerate(port_list):
+                score = fuzz.token_sort_ratio(str(base_name).lower(), str(port_row['Script Name']).lower())
+                if score > best_port_score:
+                    best_port_score = score
+                    # Threshold 80%
+                    if score >= 80:
+                        port_match = port_row
+                        match_type = "Fuzzy Name"
+
+        # Prepare Report Variables
         port_units = 0.0
         port_script = "Not Found"
         match_status = "No Match"
 
-        if best_port_score >= 80 and best_port_match:
-            port_units = best_port_match['Closing Quantity']
-            port_script = best_port_match['Script Name']
-            matched_port_indices.add(best_port_idx)
+        if port_match:
+            port_units = port_match['Closing Quantity']
+            port_script = port_match['Script Name']
 
             diff_units = total_client_units - port_units
             if diff_units == 0:
@@ -89,7 +126,7 @@ def verify_audit(portfolio_df, client_df, corporate_actions_df):
                 exception_data.append({
                     'Investment': base_name,
                     'Issue': 'Quantity Mismatch',
-                    'Details': f"Client Total: {total_client_units}, Portfolio: {port_units}"
+                    'Details': f"Match by {match_type}. Client: {total_client_units}, Port: {port_units}"
                 })
         else:
             match_status = "Not Found in Portfolio"
@@ -98,18 +135,19 @@ def verify_audit(portfolio_df, client_df, corporate_actions_df):
                  exception_data.append({
                     'Investment': base_name,
                     'Issue': 'Portfolio Missing',
-                    'Details': f"Best match: {best_port_score}% ({port_script if best_port_match else 'None'})"
+                    'Details': f"Lookup by {match_type}. ISIN: {isin if isin else 'N/A'}"
                 })
 
         # Add to Reconciliation Report
         reconciliation_data.append({
-            'Investment (Client)': base_name, # Grouped Name
+            'ISIN': isin if isin else "",
+            'Investment (Client)': base_name,
             'Script Name (Port)': port_script,
             'Client Units': total_client_units,
             'Portfolio Units': port_units,
             'Difference': diff_units,
             'Status': match_status,
-            'Match Score': best_port_score
+            'Match Method': match_type
         })
 
         # ==========================================
@@ -117,8 +155,8 @@ def verify_audit(portfolio_df, client_df, corporate_actions_df):
         # ==========================================
 
         # Find matching Corporate Action (Dividend)
-        # Ideally use Portfolio Name if matched, else Client Base Name
-        search_name = port_script if best_port_score >= 80 else base_name
+        # We use Portfolio Name if available (it's official), else Client Base Name
+        search_name = port_script if port_match else base_name
 
         matched_dps = 0.0
 
@@ -131,8 +169,8 @@ def verify_audit(portfolio_df, client_df, corporate_actions_df):
                         matched_dps += float(dps)
 
         # Calculate Expected
-        # Expected = DPS * Portfolio Closing Units
-        # Using Portfolio Units (reconciled/audit standard)
+        # Expected = DPS * Portfolio Closing Units (if matched)
+        # Use Portfolio units if we have a match, otherwise 0 (can't verify)
         calc_units = port_units if match_status != "No Match" else 0
         expected_div = matched_dps * calc_units
 
@@ -150,6 +188,7 @@ def verify_audit(portfolio_df, client_df, corporate_actions_df):
                 })
 
             dividend_data.append({
+                'ISIN': isin if isin else "",
                 'Investment': base_name,
                 'DPS (Corp)': matched_dps,
                 'Units (Port)': calc_units,
@@ -165,7 +204,17 @@ def verify_audit(portfolio_df, client_df, corporate_actions_df):
 
     for _, group_row in client_grouped.iterrows():
         base_name = group_row['Base Name']
+        isin = group_row['ISIN']
         has_client_bonus = group_row['Is Bonus']
+
+        # Use Portfolio script name if available (more accurate for matching Corp Actions)
+        # We need to re-find the match (or store it earlier)
+        # For simplicity, let's re-use the search_name logic or just Base Name
+        # Actually, using Base Name is safer if we didn't find Portfolio match.
+        # But if we found Portfolio match by ISIN, we should use that name.
+        # Let's quickly re-lookup
+        port_match = port_isin_map.get(isin) if isin and isin in port_isin_map else None
+        search_name = port_match['Script Name'] if port_match else base_name
 
         # Check Corp Action for Bonus
         has_corp_bonus = False
@@ -173,7 +222,7 @@ def verify_audit(portfolio_df, client_df, corporate_actions_df):
 
         for ca_row in corp_list:
             if "bonus" in str(ca_row['Purpose']).lower():
-                score = fuzz.token_sort_ratio(str(base_name).lower(), str(ca_row['Security Name']).lower())
+                score = fuzz.token_sort_ratio(str(search_name).lower(), str(ca_row['Security Name']).lower())
                 if score >= 80:
                     has_corp_bonus = True
                     corp_bonus_details = ca_row['Purpose']
@@ -197,6 +246,7 @@ def verify_audit(portfolio_df, client_df, corporate_actions_df):
 
         if has_client_bonus or has_corp_bonus:
             bonus_data.append({
+                'ISIN': isin if isin else "",
                 'Investment': base_name,
                 'Bonus in Corp Action': "Yes" if has_corp_bonus else "No",
                 'Bonus in Working': "Yes" if has_client_bonus else "No",

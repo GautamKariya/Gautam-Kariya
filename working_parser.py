@@ -104,6 +104,7 @@ def parse_client_working_v2(file, previous_file=None):
         name_col = None
         qty_col = None
         div_col = None
+        isin_col = None
 
         # We search column headers
         # Headers might contain newlines if read directly from Excel, usually Pandas keeps them.
@@ -115,6 +116,11 @@ def parse_client_working_v2(file, previous_file=None):
                 name_col = col
                 continue
 
+            # ISIN Column (New Requirement)
+            if "isin" in c_str: # Matches "ISIN CODE"
+                isin_col = col
+                continue
+
             # Quantity Column (Closing Units)
             # Must contain "Closing" AND "units"
             if "closing" in c_str and "units" in c_str:
@@ -123,32 +129,19 @@ def parse_client_working_v2(file, previous_file=None):
 
             # Dividend Column
             # Contains "DIVIDEND" (more specific than "DIV") but NOT "BONUS"
-            # This matches "Dividend", "Dividend Recd", "Div Recd" (if "div" logic used, but user requested "Dividend" specific now)
-            # Wait, user said: "Dividend column... clearly visible as 'Dividend Received'... refine rule: Search for header containing 'Dividend'... (not just 'DIV')"
-            # However, user also listed "Div Recd" as potential name previously.
-            # "Dividend" covers "Dividend Recd" and "Cumulative Dividend".
-            # It DOES NOT cover "Div Recd".
-            # The user said: "The only refinement is narrowing dividend header detection to 'Dividend' instead of generic 'DIV'."
-            # Let's check if "Dividend" is safe enough. "Div Recd" would fail.
-            # But earlier user said: "It may appear as: Dividend, Dividend Recd, Div Recd...".
-            # Then latest instruction: "Search for header containing: 'Dividend'".
-            # If I stick strictly to "Dividend", I might miss "Div Recd".
-            # But the user is looking at a specific file where it says "Dividend Received".
-            # Let's use "Dividend" as primary, fallback to "Div " if needed?
-            # Or just "dividend".
-
             if "dividend" in c_str and "bonus" not in c_str:
                 div_col = col
                 continue
 
-        return name_col, qty_col, div_col
+        return name_col, isin_col, qty_col, div_col
 
     # Identify Columns in Current
-    name_col, qty_col, div_col = find_columns(df_curr)
+    name_col, isin_col, qty_col, div_col = find_columns(df_curr)
 
-    if not all([name_col, qty_col, div_col]):
+    if not all([name_col, isin_col, qty_col, div_col]):
         missing = []
         if not name_col: missing.append("Name of Investment")
+        if not isin_col: missing.append("ISIN CODE")
         if not qty_col: missing.append("Closing Units")
         if not div_col: missing.append("Dividend")
         error_msg = f"Missing required columns in Current File: {', '.join(missing)}"
@@ -161,7 +154,20 @@ def parse_client_working_v2(file, previous_file=None):
     # Create a map of Previous Cumulative Dividends if available
     prev_div_map = {}
     if not df_prev.empty:
-        p_name_col, _, p_div_col = find_columns(df_prev)
+        # Note: Previous file might not have ISIN column if it's old format.
+        # So we should be careful. But for dividend calc, we match on Base Name currently.
+        # If we switch to matching on ISIN for Dividends too, we need ISIN in prev file.
+        # However, the user said they added ISIN column to "Client Working File".
+        # Assuming current and future files have it. Previous files might not.
+        # Let's try to extract ISIN from prev file if available, otherwise use Base Name map as fallback?
+        # The logic below uses Base Name as key for `prev_div_map`.
+        # Since the ISIN matching is primarily for Portfolio <-> Client reconciliation,
+        # and Dividend Diff is calculated per Client row (or group),
+        # we can stick to Base Name for the Dividend Carry Forward logic WITHIN the Client file (Current vs Prev).
+        # Unless ISIN is better. Base Name is unique enough usually.
+        # Let's keep Base Name for prev_div_map key for now to support backward compatibility if prev file lacks ISIN.
+
+        p_name_col, _, p_qty_col, p_div_col = find_columns(df_prev)
 
         if p_name_col and p_div_col:
             for _, row in df_prev.iterrows():
@@ -194,6 +200,9 @@ def parse_client_working_v2(file, previous_file=None):
         base_name = raw_name.upper().replace("(BONUS)", "").strip()
         is_bonus = "(BONUS)" in raw_name.upper()
 
+        # Extract ISIN
+        isin_val = str(row[isin_col]).strip().upper() if pd.notna(row[isin_col]) else ""
+
         # 2. Extract Values
         try:
             qty = float(row[qty_col])
@@ -209,10 +218,12 @@ def parse_client_working_v2(file, previous_file=None):
         quarterly_div = 0.0
 
         if curr_cum_div > 0:
+            # Match with previous based on Base Name (as ISIN might be missing in prev file)
             prev_cum_div = prev_div_map.get(base_name, 0.0)
             quarterly_div = curr_cum_div - prev_cum_div
 
         result_data.append({
+            'ISIN': isin_val,
             'Investment Name': raw_name,
             'Base Name': base_name,
             'Closing Units': qty,

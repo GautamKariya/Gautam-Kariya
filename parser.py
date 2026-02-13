@@ -12,7 +12,7 @@ def parse_portfolio_html_v2(file_content):
     - Section 2: ISINs with No Transactions (starts after separator).
 
     Extracts:
-    - ISIN (Must start with 'INE', ignore 'INF')
+    - ISIN (Must start with 'INE' or 'INF')
     - Script Name
     - Final Closing Balance Quantity
 
@@ -79,7 +79,8 @@ def parse_portfolio_html_v2(file_content):
                 raw_isin = cells[1].get_text(strip=True)
                 raw_script = cells[2].get_text(strip=True)
 
-                if raw_isin.startswith("INE"):
+                # Allow INE (Equity) and INF (Mutual Funds/ETFs)
+                if raw_isin.startswith("INE") or raw_isin.startswith("INF"):
                     current_isin = raw_isin
                     current_script = raw_script
                     current_qty = None
