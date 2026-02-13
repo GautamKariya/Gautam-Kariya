@@ -35,12 +35,12 @@ def process_corporate_actions(file, start_date, end_date):
         logging.error(f"Missing columns in CSV: {missing_cols}")
         return pd.DataFrame()
 
-    # Filter for Dividends
-    # Case insensitive search for "Dividend" in 'Purpose'
-    df = df[df['Purpose'].str.contains("Dividend", case=False, na=False)].copy()
+    # Filter for Dividends and Bonus
+    # Case insensitive search for "Dividend" or "Bonus" in 'Purpose'
+    df = df[df['Purpose'].str.contains("Dividend|Bonus", case=False, na=False, regex=True)].copy()
 
     if df.empty:
-        logging.info("No dividend entries found in the file.")
+        logging.info("No dividend or bonus entries found in the file.")
         return pd.DataFrame()
 
     # Convert Ex Date to datetime
