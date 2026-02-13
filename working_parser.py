@@ -20,9 +20,31 @@ def parse_client_working_v2(file, previous_file=None):
     logging.info("Starting Client Working File parsing (v2).")
 
     def load_shares_sheet(f, file_label="Current File"):
+        xls = None
         try:
-            xls = pd.ExcelFile(f, engine='openpyxl')
+            # Try to let Pandas auto-detect engine
+            # This handles .xlsx (openpyxl) and .xls (xlrd) automatically if libraries are installed.
+            # Streamlit file uploader returns a BytesIO which pandas reads.
+            # However, sometimes if extension is missing/wrong, we might need to hint.
+            # Let's try default first.
+            xls = pd.ExcelFile(f)
+        except Exception as e:
+            # If default fails, maybe try explicit openpyxl if it was a zip error
+            # But usually pandas tries both.
+            # If it's "File is not a zip file", it means it tried openpyxl on a non-zip file (like .xls).
+            # If xlrd is installed, pandas *should* fall back to it for .xls signatures.
+            # If it failed, it means either:
+            # 1. It's not a valid Excel file at all.
+            # 2. It's an .xls file but pandas tried openpyxl first and gave up.
+            # Let's try explicit xlrd as fallback.
+            try:
+                f.seek(0)
+                xls = pd.ExcelFile(f, engine='xlrd')
+            except Exception as e2:
+                logging.error(f"Error reading Excel {file_label}: {e}")
+                raise ValueError(f"Failed to read Excel file {file_label}. Please ensure it is a valid .xlsx or .xls file. Error: {str(e)}")
 
+        try:
             # Case-insensitive sheet search
             sheet_name = None
             for name in xls.sheet_names:
@@ -61,8 +83,8 @@ def parse_client_working_v2(file, previous_file=None):
             logging.error(f"Validation Error in {file_label}: {ve}")
             raise ve
         except Exception as e:
-            logging.error(f"Error reading Excel {file_label}: {e}")
-            raise ValueError(f"Failed to read Excel file {file_label}: {str(e)}")
+            logging.error(f"Error processing sheet in {file_label}: {e}")
+            raise ValueError(f"Failed to process sheet content in {file_label}: {str(e)}")
 
     # Load Current
     df_curr = load_shares_sheet(file, "Current Quarter Client Working")
@@ -76,10 +98,6 @@ def parse_client_working_v2(file, previous_file=None):
             df_prev = load_shares_sheet(previous_file, "Previous Quarter Client Working")
         except ValueError as ve:
             logging.warning(f"Previous file parsing failed: {ve}. Proceeding without previous data.")
-            # Optional: We could raise error or just warn. User said previous is optional.
-            # If they UPLOADED it, they probably expect it to work. Let's warn but continue?
-            # Or raise? Better to raise if the user explicitly provided a file that is invalid.
-            # But strictly speaking, if it fails, we default to Q1 logic.
             pass
 
     def find_columns(df):
