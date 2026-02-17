@@ -41,7 +41,13 @@ def parse_shares_input_file(file):
                 break
 
         if not sheet_name:
-            raise ValueError(f"Sheet 'SHARES' not found.")
+            logging.warning("Sheet 'SHARES' not found. Defaulting to first sheet.")
+            if len(xls.sheet_names) > 0:
+                sheet_name = xls.sheet_names[0]
+            else:
+                raise ValueError("Excel file contains no sheets.")
+
+        logging.info(f"Parsing sheet: {sheet_name}")
 
         # Scan for header
         df_scan = pd.read_excel(xls, sheet_name=sheet_name, header=None, nrows=50)
