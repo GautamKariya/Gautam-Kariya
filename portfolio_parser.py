@@ -3,16 +3,16 @@ from bs4 import BeautifulSoup
 import re
 import logging
 
-def parse_portfolio_html_v2(file_content):
+def parse_portfolio_html_equity(file_content):
     """
     Parses the NSDL/SHCIL Portfolio Transaction Statement HTML.
 
-    Structure:
-    - Section 1: ISINs with Transactions (ends with specific separator).
-    - Section 2: ISINs with No Transactions (starts after separator).
+    Filters:
+    - Only processes ISINs starting with 'INE' (Equity).
+    - Ignores 'INF', 'INB', etc.
 
     Extracts:
-    - ISIN (Must start with 'INE' or 'INF')
+    - ISIN
     - Script Name
     - Final Closing Balance Quantity
 
@@ -22,7 +22,7 @@ def parse_portfolio_html_v2(file_content):
     Returns:
         pd.DataFrame: Columns ['ISIN', 'Script Name', 'Closing Quantity']
     """
-    logging.info("Starting Portfolio HTML parsing (v2).")
+    logging.info("Starting Portfolio HTML parsing (Equity Only).")
     soup = BeautifulSoup(file_content, 'lxml')
 
     data = []
@@ -79,12 +79,13 @@ def parse_portfolio_html_v2(file_content):
                 raw_isin = cells[1].get_text(strip=True)
                 raw_script = cells[2].get_text(strip=True)
 
-                # Allow INE (Equity) and INF (Mutual Funds/ETFs)
-                if raw_isin.startswith("INE") or raw_isin.startswith("INF"):
+                # Filter for Equity (INE) ONLY
+                if raw_isin.startswith("INE"):
                     current_isin = raw_isin
                     current_script = raw_script
                     current_qty = None
                 else:
+                    # Skip non-equity
                     current_isin = None
 
                 continue
@@ -94,7 +95,6 @@ def parse_portfolio_html_v2(file_content):
                 # Look for "Closing Balance" or "Balance"
                 if "Closing Balance" in row_text or "Balance" in row_text:
                     # Extract numeric value using regex from the row or last cell
-                    # This handles both Section 1 (Value in separate cell) and Section 2 (Value in same cell text)
 
                     # Try last cell text first (most likely location)
                     target_text = ""
@@ -107,7 +107,6 @@ def parse_portfolio_html_v2(file_content):
                     clean_text = target_text.replace(',', '')
 
                     # Regex to find a number (integer or float)
-                    # Pattern: optional - sign, digits, optional dot, optional digits
                     match = re.search(r'([-+]?\d*\.?\d+)', clean_text)
 
                     if match:
@@ -129,5 +128,5 @@ def parse_portfolio_html_v2(file_content):
     if not df.empty:
         df = df.drop_duplicates(subset=['ISIN'], keep='last')
 
-    logging.info(f"Parsed {len(df)} ISINs from Portfolio (v2).")
+    logging.info(f"Parsed {len(df)} Equity ISINs from Portfolio.")
     return df
