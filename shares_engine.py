@@ -30,6 +30,12 @@ def verify_shares_audit(portfolio_df, client_df, corporate_actions_df, bhav_copy
     # Need to handle multiple actions for same script
     # Standardize Script Code to string for robust grouping
     corporate_actions_df = corporate_actions_df.copy()
+
+    if corporate_actions_df.empty:
+        # Handle empty Corporate Actions case gracefully
+        if 'Script Code' not in corporate_actions_df.columns:
+             corporate_actions_df['Script Code'] = []
+
     try:
         corporate_actions_df['Script Code'] = corporate_actions_df['Script Code'].astype(float).astype(int).astype(str)
     except ValueError:
