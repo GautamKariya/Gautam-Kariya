@@ -9,6 +9,9 @@ def parse_portfolio_html(file_obj):
     """
     try:
         if hasattr(file_obj, 'read'):
+            # Check if file object supports seek and reset it
+            if hasattr(file_obj, 'seek'):
+                file_obj.seek(0)
             content = file_obj.read()
             if isinstance(content, bytes):
                 content = content.decode('utf-8', errors='ignore')
@@ -21,73 +24,98 @@ def parse_portfolio_html(file_obj):
         return None, f"Error parsing HTML: {str(e)}"
 
     data = []
+    current_isin = None
 
-    # Strategy: Find all tables, look for headers ISIN and Closing Balance
-    # Then extract rows.
-    # Handle "No transactions" section similarly.
+    # Use find_all('tr') to iterate through all rows
+    rows = soup.find_all('tr')
 
-    tables = soup.find_all('table')
-
-    for table in tables:
-        rows = table.find_all('tr')
-        if not rows:
+    for row in rows:
+        # Get all cells in this row
+        cells = row.find_all(['td', 'th'])
+        if not cells:
             continue
 
-        # Try to identify columns from header row
-        # Usually first row or th
-        header_map = {}
-        header_found = False
+        cell_texts = [c.get_text(strip=True) for c in cells]
 
-        # Scan first few rows for header
-        for i, row in enumerate(rows[:5]):
-            cells = row.find_all(['th', 'td'])
-            cell_texts = [c.get_text(strip=True).lower() for c in cells]
+        # 1. Detect ISIN Row
+        # Logic: Cell contains 'ISIN' and adjacent cell has value starting with 'IN'
+        isin_found_in_row = False
 
-            if 'isin' in cell_texts and ('closing balance' in cell_texts or 'closing qty' in cell_texts or 'balance' in cell_texts):
-                # Found header
-                for idx, text in enumerate(cell_texts):
-                    if 'isin' in text:
-                        header_map['isin'] = idx
-                    elif 'closing balance' in text or 'closing qty' in text or 'balance' in text:
-                        # Prioritize explicit Closing Balance
-                        header_map['closing'] = idx
-                header_found = True
-                start_row = i + 1
-                break
+        for i, txt in enumerate(cell_texts):
+            if txt.upper() == 'ISIN':
+                # Check next cell for value
+                if i + 1 < len(cell_texts):
+                    val = cell_texts[i+1].strip()
+                    # Basic validation: starts with 'IN' (usually INE or INF) and length > 5
+                    if len(val) > 5 and val.upper().startswith('IN'):
+                        current_isin = val.upper()
+                        isin_found_in_row = True
+                        break
 
-        if header_found and 'isin' in header_map and 'closing' in header_map:
-            # Extract data from this table
-            for row in rows[start_row:]:
-                cells = row.find_all(['td', 'th'])
-                if len(cells) <= max(header_map.values()):
+        if isin_found_in_row:
+            continue
+
+        # 2. Detect Balance Row (only if we have an active ISIN)
+        if current_isin:
+            balance_found = False
+            balance_val = 0.0
+
+            for i, txt in enumerate(cell_texts):
+                txt_upper = txt.upper()
+
+                # Exclude Opening
+                if "OPENING" in txt_upper:
                     continue
 
-                isin_text = cells[header_map['isin']].get_text(strip=True)
-                closing_text = cells[header_map['closing']].get_text(strip=True)
+                # Match Balance keywords
+                # Note: "Balance :" includes the colon. "Closing Balance :" includes colon.
+                # The user requirement: "Balance :" (transaction) or "Closing Balance :" (no transaction)
 
-                # Check ISIN format
-                if isin_text.upper().startswith('INE'):
-                    # Clean closing balance
-                    # Remove commas, verify number
-                    closing_clean = re.sub(r'[^\d.]', '', closing_text)
-                    try:
-                        closing_val = float(closing_clean) if closing_clean else 0.0
+                if "BALANCE :" in txt_upper or "CLOSING BALANCE :" in txt_upper:
+                    # Found label.
+
+                    # Strategy A: Value is in the NEXT cell
+                    if i + 1 < len(cell_texts):
+                        val_str = cell_texts[i+1]
+                        # Remove commas, keep digits and dot
+                        val_clean = re.sub(r'[^\d.]', '', val_str)
+                        try:
+                            # Verify if clean string is non-empty
+                            if val_clean:
+                                balance_val = float(val_clean)
+                                balance_found = True
+                        except ValueError:
+                            pass
+
+                    # Strategy B: Value is embedded in the label cell text? (Unlikely per snippet, but robust)
+                    if not balance_found:
+                         matches = re.findall(r'(\d+(?:\.\d+)?)', txt)
+                         if matches:
+                             try:
+                                 balance_val = float(matches[-1])
+                                 balance_found = True
+                             except ValueError:
+                                 pass
+
+                    if balance_found:
+                        # Add record
                         data.append({
-                            'isin': isin_text.upper(),
-                            'portfolio_closing_units': closing_val
+                            'isin': current_isin,
+                            'portfolio_closing_units': balance_val
                         })
-                    except ValueError:
-                        continue
+                        current_isin = None # Reset for next ISIN block
+                        break
 
     if not data:
-        # Fallback: Look for "No transactions recorded..." text and try to find a table following it
-        # Sometimes these are just listed without strict headers in the same way
-        # But if the main logic failed, we might need a more generic scraper
-        return None, "No valid ISIN/Closing Balance data found in HTML tables."
+        return None, "No valid ISIN/Closing Balance data found in HTML."
 
     df = pd.DataFrame(data)
-    # Aggregate if duplicates (shouldn't be for closing balance, but just in case take the last one or sum?)
-    # Usually one entry per ISIN.
-    df = df.drop_duplicates(subset=['isin'], keep='last')
 
-    return df, None
+    # Filter for Equity Shares (INE)
+    # The snippet contained INF (Mutual Funds), we filter them out here as per requirement
+    df_ine = df[df['isin'].str.startswith('INE')].copy()
+
+    # Drop duplicates if any (keep last entry per ISIN just in case)
+    df_ine = df_ine.drop_duplicates(subset=['isin'], keep='last')
+
+    return df_ine, None
