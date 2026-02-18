@@ -1,2 +1,8 @@
-requests
-tqdm
+streamlit
+pandas
+numpy
+openpyxl
+xlrd>=2.0.1
+beautifulsoup4
+lxml
+xlsxwriter
