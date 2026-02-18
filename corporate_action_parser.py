@@ -18,7 +18,6 @@ def parse_corporate_action(file_obj, start_date, end_date):
 
     # Required columns check
     req_cols = ['Security Code', 'Purpose', 'Ex Date']
-    # Case-insensitive mapping
     col_map = {c.lower(): c for c in df.columns}
 
     final_cols = {}
@@ -30,15 +29,12 @@ def parse_corporate_action(file_obj, start_date, end_date):
         missing = [rc for rc in req_cols if rc.lower() not in col_map]
         return None, f"Missing columns in Corporate Action CSV: {', '.join(missing)}"
 
-    # Rename to standard
     df = df.rename(columns={v: k for k, v in final_cols.items()})
 
     # Convert Ex Date to datetime
-    # Use pandas robust parsing, assuming dayfirst for Indian context
     df['Ex Date'] = pd.to_datetime(df['Ex Date'], dayfirst=True, errors='coerce').dt.date
 
     # Filter by date range
-    # Ensure inputs are dates
     if isinstance(start_date, datetime): start_date = start_date.date()
     if isinstance(end_date, datetime): end_date = end_date.date()
 
@@ -56,10 +52,6 @@ def parse_corporate_action(file_obj, start_date, end_date):
 
         # Bonus Logic
         if "bonus issue" in purpose_lower:
-            # Regex: (\d+)\s*:\s*(\d+)
-            # Group 1 = New (A), Group 2 = Old (B)
-            # Interpretation: A:B -> A new shares for B old shares
-            # Ratio = A / B
             match = re.search(r'(\d+)\s*:\s*(\d+)', purpose)
             if match:
                 try:
@@ -79,42 +71,35 @@ def parse_corporate_action(file_obj, start_date, end_date):
 
         # Dividend Logic
         elif "dividend" in purpose_lower:
-            # Must contain "Dividend" (already checked by elif condition, but double check)
-            # Ignore Bonus rows if they happen to contain "Dividend" word (unlikely but safe)
+            # Ignore Bonus rows
             if "bonus" in purpose_lower:
                 continue
 
             # Extract DPS
-            # User requirement: Extract numeric value after "Rs."
-            # Regex: Rs\.?\s*(\d+(?:\.\d+)?)
-
             dps = 0.0
             found_dps = False
 
-            # Try specific currency patterns first
-            curr_match = re.search(r'(?:rs\.?|inr)\s*-?\s*(\d+(?:\.\d+)?)', purpose, re.IGNORECASE)
-            if curr_match:
+            # User specific pattern: "Interim Dividend - Rs. - 0.8000"
+            # Regex: Rs\.?\s*-\s*([0-9.]+)
+
+            # Pattern 1: Strict "Rs. - 0.80"
+            match = re.search(r'Rs\.?\s*-\s*(\d+(?:\.\d+)?)', purpose, re.IGNORECASE)
+            if match:
                 try:
-                    dps = float(curr_match.group(1))
+                    dps = float(match.group(1))
                     found_dps = True
                 except ValueError:
                     pass
-            else:
-                # Fallback: find first number found (if strict "Rs." requirement fails?)
-                # User said: "Extract DPS value after: Rs. Use regex to extract the numeric value."
-                # But previous prompt said "Primary pattern expected: Rs., Rs, INR or no prefix."
-                # Current prompt says "Extract DPS value after: Rs."
-                # I will stick to looking for Rs/INR first, then fallback to first number if no Rs found?
-                # "2. Extract DPS value after: Rs." -> implies Rs is present.
-                # But let's be robust. If "Dividend 2.50", it's likely 2.50.
 
-                nums = re.findall(r'(\d+(?:\.\d+)?)', purpose)
-                if nums:
+            # Pattern 2: Fallback "Rs. 0.80" or "INR 0.80"
+            if not found_dps:
+                match = re.search(r'(?:Rs\.?|INR)\s*(\d+(?:\.\d+)?)', purpose, re.IGNORECASE)
+                if match:
                     try:
-                         dps = float(nums[0])
-                         found_dps = True
+                        dps = float(match.group(1))
+                        found_dps = True
                     except ValueError:
-                         pass
+                        pass
 
             if found_dps:
                 results.append({
@@ -125,9 +110,7 @@ def parse_corporate_action(file_obj, start_date, end_date):
                     'details': f"Dividend DPS: {dps}"
                 })
 
-    # Return DataFrame
     if not results:
-        # Return empty DF with columns
         return pd.DataFrame(columns=['script_code', 'ex_date', 'action_type', 'value', 'details']), None
 
     return pd.DataFrame(results), None

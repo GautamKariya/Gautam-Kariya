@@ -4,19 +4,13 @@ from io import BytesIO
 
 def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
     """
-    Runs the verification logic using Hybrid Approach:
-    - ISIN Aggregation for Closing Units, Bonus, Dividend.
-    - Row-wise for Market Price, Market Value, UGL.
-
-    Returns:
-        summary_stats (dict): Counts of mismatches.
-        output_dfs (dict): DataFrames for Excel sheets.
-        exceptions_df (DataFrame): Consolidated exceptions.
+    Runs the verification logic using Hybrid Approach.
     """
 
-    # 1. Pre-process Corporate Actions (Group by script_code)
+    # 1. Pre-process Corporate Actions
     corp_actions = {}
     if corp_action_df is not None and not corp_action_df.empty:
+        # Group by script_code
         for script_code, group in corp_action_df.groupby('script_code'):
             bonuses = group[group['action_type'] == 'Bonus']
             dividends = group[group['action_type'] == 'Dividend']
@@ -33,6 +27,7 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
 
     bhav_map = {}
     if bhav_copy_df is not None and not bhav_copy_df.empty:
+        # Bhav Copy is already filtered for EQ and duplicates dropped
         if 'ISIN' in bhav_copy_df.columns:
             bhav_map = bhav_copy_df.set_index('ISIN')['bhav_close'].to_dict()
         elif 'isin' in bhav_copy_df.columns:
@@ -59,7 +54,6 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
 
     shares_agg = shares_df.groupby('isin', as_index=False).agg(agg_dict)
 
-    # Initialize Output Containers
     exceptions = []
 
     # --- MODULE 1: CLOSING UNITS (AGGREGATED) ---
@@ -87,7 +81,7 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
     res_bonus = []
     for _, row in shares_agg.iterrows():
         isin = row['isin']
-        script = row.get('script_code', '')
+        script = str(row.get('script_code', '')).strip()
         agg_opening = row['opening_units']
         agg_bonus = row['bonus_recd']
 
@@ -114,7 +108,7 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
     res_dividend = []
     for _, row in shares_agg.iterrows():
         isin = row['isin']
-        script = row.get('script_code', '')
+        script = str(row.get('script_code', '')).strip()
         agg_closing = row['closing_units']
         agg_dividend = row['dividend_recd']
 
@@ -138,13 +132,12 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
     df_dividend = pd.DataFrame(res_dividend)
 
     # --- MODULE 4, 5, 6: PRICE, MV, UGL (ROW-WISE) ---
-    # Iterate original shares_df
     res_price_mv = []
     res_ugl = []
 
     for idx, row in shares_df.iterrows():
         isin = row.get('isin', '')
-        script = row.get('script_code', '')
+        script = str(row.get('script_code', '')).strip()
         name = row.get('name', '')
 
         closing_units = row.get('closing_units', 0.0)
@@ -156,26 +149,25 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
 
         # Price Verification
         price_diff = input_price - bhav_price
+        # Match if Price Diff < 1.0 (Absolute)
         price_match = abs(price_diff) < 1.0
 
         # MV Verification
         expected_mv = closing_units * bhav_price
         mv_diff = input_mv - expected_mv
+
+        # MV Diff % = ABS(MV Diff) / Expected MV
         if expected_mv != 0:
-            mv_diff_pct = (abs(mv_diff) / expected_mv) * 100
+            mv_diff_pct = abs(mv_diff) / expected_mv
         else:
-            mv_diff_pct = 0.0 if input_mv == 0 else 100.0
+            mv_diff_pct = 0.0 if input_mv == 0 else 1.0 # 100% diff if expected 0 and input > 0
 
-        mv_match = mv_diff_pct <= 1.0
-
-        # Combined Exception Logic
-        # "Even if price diff < 1, calculate Expected MV. If MV Diff % > 1% -> Error."
-        # This implies checking MV match is the primary failure condition?
-        # Or do we report Price mismatch separately?
-        # Usually separate columns.
+        # Match if MV Diff % <= 1% (0.01)
+        mv_match = mv_diff_pct <= 0.01
 
         if not mv_match:
-             exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'MV/Price Mismatch', 'Details': f"Row {idx+2}: MV Diff % {mv_diff_pct:.2f}%, Price Diff {price_diff:.2f}"})
+             # Format for exception: percentage x 100 -> "0.66%"
+             exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'MV/Price Mismatch', 'Details': f"MV Diff %: {mv_diff_pct*100:.2f}% (Limit 1%), Price Diff: {price_diff:.2f}"})
 
         res_price_mv.append({
             'ISIN': isin, 'Script Code': script, 'Name': name,
@@ -185,7 +177,6 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
         })
 
         # UGL Calculation
-        # UGL = Expected MV - Closing Amount (Row-wise)
         calculated_ugl = expected_mv - closing_amount
 
         res_ugl.append({
@@ -197,10 +188,8 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
     df_price_mv = pd.DataFrame(res_price_mv)
     df_ugl = pd.DataFrame(res_ugl)
 
-    # Exceptions DF
     df_exceptions = pd.DataFrame(exceptions)
 
-    # Summary
     summary = {
         'Total ISINs (Agg)': len(shares_agg),
         'Total Input Rows': len(shares_df),
@@ -226,11 +215,22 @@ def generate_excel_report(output_dfs, df_exceptions):
     """
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        workbook = writer.book
+        # Define formats
+        pct_fmt = workbook.add_format({'num_format': '0.00%'})
+        num_fmt = workbook.add_format({'num_format': '#,##0.00'})
 
-        # Helper to write
         def write(df, name):
             if df is not None and not df.empty:
                 df.to_excel(writer, sheet_name=name, index=False)
+                worksheet = writer.sheets[name]
+
+                # Apply formats if columns exist
+                for i, col in enumerate(df.columns):
+                    if col == 'MV Diff %':
+                        worksheet.set_column(i, i, None, pct_fmt)
+                    elif 'Price' in col or 'MV' in col or 'Diff' in col or 'Amount' in col or 'UGL' in col:
+                        worksheet.set_column(i, i, None, num_fmt)
             else:
                 pd.DataFrame().to_excel(writer, sheet_name=name, index=False)
 
