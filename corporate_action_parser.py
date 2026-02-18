@@ -57,33 +57,42 @@ def parse_corporate_action(file_obj, start_date, end_date):
         # Bonus Logic
         if "bonus issue" in purpose_lower:
             # Regex: (\d+)\s*:\s*(\d+)
-            # Group 1 = Old (A), Group 2 = New (B)
-            # Ratio = New / Old = B / A
+            # Group 1 = New (A), Group 2 = Old (B)
+            # Interpretation: A:B -> A new shares for B old shares
+            # Ratio = A / B
             match = re.search(r'(\d+)\s*:\s*(\d+)', purpose)
             if match:
                 try:
-                    old_share = float(match.group(1))
-                    new_share = float(match.group(2))
-                    if old_share > 0:
-                        ratio = new_share / old_share
+                    new_share_a = float(match.group(1))
+                    old_share_b = float(match.group(2))
+                    if old_share_b > 0:
+                        ratio = new_share_a / old_share_b
                         results.append({
                             'script_code': script_code,
                             'ex_date': ex_date,
                             'action_type': 'Bonus',
                             'value': ratio,
-                            'details': f"Bonus {int(old_share)}:{int(new_share)}"
+                            'details': f"Bonus {int(new_share_a)}:{int(old_share_b)}"
                         })
                 except ValueError:
                     pass
 
         # Dividend Logic
-        elif any(k in purpose_lower for k in ["interim dividend", "final dividend", "special dividend"]):
+        elif "dividend" in purpose_lower:
+            # Must contain "Dividend" (already checked by elif condition, but double check)
+            # Ignore Bonus rows if they happen to contain "Dividend" word (unlikely but safe)
+            if "bonus" in purpose_lower:
+                continue
+
             # Extract DPS
+            # User requirement: Extract numeric value after "Rs."
+            # Regex: Rs\.?\s*(\d+(?:\.\d+)?)
+
             dps = 0.0
             found_dps = False
 
             # Try specific currency patterns first
-            curr_match = re.search(r'(?:rs\.?|inr)\s*(\d+(?:\.\d+)?)', purpose, re.IGNORECASE)
+            curr_match = re.search(r'(?:rs\.?|inr)\s*-?\s*(\d+(?:\.\d+)?)', purpose, re.IGNORECASE)
             if curr_match:
                 try:
                     dps = float(curr_match.group(1))
@@ -91,7 +100,14 @@ def parse_corporate_action(file_obj, start_date, end_date):
                 except ValueError:
                     pass
             else:
-                # Fallback: find first number found.
+                # Fallback: find first number found (if strict "Rs." requirement fails?)
+                # User said: "Extract DPS value after: Rs. Use regex to extract the numeric value."
+                # But previous prompt said "Primary pattern expected: Rs., Rs, INR or no prefix."
+                # Current prompt says "Extract DPS value after: Rs."
+                # I will stick to looking for Rs/INR first, then fallback to first number if no Rs found?
+                # "2. Extract DPS value after: Rs." -> implies Rs is present.
+                # But let's be robust. If "Dividend 2.50", it's likely 2.50.
+
                 nums = re.findall(r'(\d+(?:\.\d+)?)', purpose)
                 if nums:
                     try:
