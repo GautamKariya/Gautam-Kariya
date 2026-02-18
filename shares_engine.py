@@ -27,7 +27,6 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
 
     bhav_map = {}
     if bhav_copy_df is not None and not bhav_copy_df.empty:
-        # Bhav Copy is already filtered for EQ and duplicates dropped
         if 'ISIN' in bhav_copy_df.columns:
             bhav_map = bhav_copy_df.set_index('ISIN')['bhav_close'].to_dict()
         elif 'isin' in bhav_copy_df.columns:
@@ -117,7 +116,13 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
         expected_dividend = agg_closing * total_dps
 
         diff = agg_dividend - expected_dividend
-        match = abs(diff) < 1.0
+
+        # New Rule: Dividend Tolerance <= 2 (Absolute)
+        if abs(diff) <= 2:
+            match = True
+            diff = 0.0 # Force diff to 0 as requested ("Show Diff as 0")
+        else:
+            match = False
 
         res_dividend.append({
             'ISIN': isin, 'Script Code': script, 'Name': row.get('name', ''),
@@ -145,29 +150,48 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
         input_price = row.get('market_price', 0.0)
         input_mv = row.get('market_value', 0.0)
 
-        bhav_price = bhav_map.get(isin, 0.0)
+        # Bhav Price Lookup
+        # Explicit check for missing key
+        if isin in bhav_map:
+            bhav_price = bhav_map[isin]
+            price_found = True
+        else:
+            bhav_price = 0.0
+            price_found = False
 
         # Price Verification
-        price_diff = input_price - bhav_price
-        # Match if Price Diff < 1.0 (Absolute)
-        price_match = abs(price_diff) < 1.0
+        if not price_found:
+             # Add specific exception for missing Bhav price
+             exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'Bhav Price Missing', 'Details': 'ISIN not found in EQ series'})
+             price_match = False
+             price_diff = 0.0 # Or mark as missing somehow? 0 diff is misleading if input price is 0.
+             # If input price > 0 and bhav 0, diff is input price.
+             price_diff = input_price - bhav_price
+        else:
+            price_diff = input_price - bhav_price
+            price_match = abs(price_diff) < 1.0
 
         # MV Verification
         expected_mv = closing_units * bhav_price
         mv_diff = input_mv - expected_mv
 
-        # MV Diff % = ABS(MV Diff) / Expected MV
         if expected_mv != 0:
             mv_diff_pct = abs(mv_diff) / expected_mv
         else:
-            mv_diff_pct = 0.0 if input_mv == 0 else 1.0 # 100% diff if expected 0 and input > 0
+            # If expected MV is 0 (price missing or units 0)
+            if input_mv == 0:
+                mv_diff_pct = 0.0
+            else:
+                mv_diff_pct = 1.0 # 100% diff
 
-        # Match if MV Diff % <= 1% (0.01)
         mv_match = mv_diff_pct <= 0.01
 
         if not mv_match:
-             # Format for exception: percentage x 100 -> "0.66%"
-             exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'MV/Price Mismatch', 'Details': f"MV Diff %: {mv_diff_pct*100:.2f}% (Limit 1%), Price Diff: {price_diff:.2f}"})
+             if not price_found:
+                 # Already logged Price Missing exception, maybe skip redundant MV mismatch log?
+                 pass
+             else:
+                 exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'MV/Price Mismatch', 'Details': f"MV Diff %: {mv_diff_pct*100:.2f}% (Limit 1%), Price Diff: {price_diff:.2f}"})
 
         res_price_mv.append({
             'ISIN': isin, 'Script Code': script, 'Name': name,
@@ -216,7 +240,6 @@ def generate_excel_report(output_dfs, df_exceptions):
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
-        # Define formats
         pct_fmt = workbook.add_format({'num_format': '0.00%'})
         num_fmt = workbook.add_format({'num_format': '#,##0.00'})
 
@@ -224,8 +247,6 @@ def generate_excel_report(output_dfs, df_exceptions):
             if df is not None and not df.empty:
                 df.to_excel(writer, sheet_name=name, index=False)
                 worksheet = writer.sheets[name]
-
-                # Apply formats if columns exist
                 for i, col in enumerate(df.columns):
                     if col == 'MV Diff %':
                         worksheet.set_column(i, i, None, pct_fmt)
