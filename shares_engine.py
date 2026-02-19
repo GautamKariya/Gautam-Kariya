@@ -26,27 +26,11 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
         portfolio_map = portfolio_df.set_index('isin')['portfolio_closing_units'].to_dict()
 
     bhav_map = {}
-    bhav_raw_df = pd.DataFrame() # For fallback lookup
-
     if bhav_copy_df is not None and not bhav_copy_df.empty:
-        # Bhav Copy is NOT filtered yet.
-        # User specified columns: ISIN (M), CLOSE (F), SERIES (B)
-        # Bhav Parser returns: ISIN, SERIES, bhav_close
-
-        # Keep raw for later lookup if needed
-        bhav_raw_df = bhav_copy_df.copy()
-
-        # Filter EQ Series
-        bhav_eq = bhav_copy_df[bhav_copy_df['SERIES'] == 'EQ'].copy()
-
-        # Handle Duplicates in EQ (should be unique but ensure)
-        bhav_eq = bhav_eq.drop_duplicates(subset=['ISIN'], keep='last')
-
-        # Create Map for EQ
-        if 'ISIN' in bhav_eq.columns:
-             bhav_map = bhav_eq.set_index('ISIN')['bhav_close'].to_dict()
-        elif 'isin' in bhav_eq.columns:
-             bhav_map = bhav_eq.set_index('isin')['bhav_close'].to_dict()
+        if 'ISIN' in bhav_copy_df.columns:
+            bhav_map = bhav_copy_df.set_index('ISIN')['bhav_close'].to_dict()
+        elif 'isin' in bhav_copy_df.columns:
+            bhav_map = bhav_copy_df.set_index('isin')['bhav_close'].to_dict()
 
     # 3. Aggregation Step (ISIN Level)
     if shares_df is None or shares_df.empty:
@@ -174,28 +158,14 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
             bhav_price = bhav_map[isin]
             price_found = True
         else:
-            # Not found in EQ map. Check if present in ANY series?
-            # For debug message precision.
-            if not bhav_raw_df.empty:
-                matches = bhav_raw_df[bhav_raw_df['ISIN'] == isin]
-                if not matches.empty:
-                    found_series = matches['SERIES'].unique()
-                    msg = f"ISIN Found in Series: {', '.join(found_series)} (Expected EQ)"
-                else:
-                    msg = "ISIN Not Found in Bhav Copy"
-            else:
-                msg = "Bhav Copy Empty"
-
             # Log Exception
-            exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'Bhav Price Missing', 'Details': msg})
-
-            # Ensure price match is False
+            exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'Bhav Price Missing', 'Details': "ISIN not found in Bhav Copy"})
             price_found = False
             bhav_price = 0.0
 
         # Price Verification
         if not price_found:
-             price_diff = input_price - bhav_price # Usually input_price - 0
+             price_diff = input_price - bhav_price
              price_match = False
         else:
             price_diff = input_price - bhav_price
