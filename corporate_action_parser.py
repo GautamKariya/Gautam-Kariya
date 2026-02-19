@@ -52,19 +52,23 @@ def parse_corporate_action(file_obj, start_date, end_date):
 
         # Bonus Logic
         if "bonus issue" in purpose_lower:
+            # Regex: (\d+)\s*:\s*(\d+)
+            # User Rule: First Group = Old (A), Second Group = New (B)
+            # Interpretation: Old:New
+            # Formula: Bonus Units = Opening * (New / Old) = Opening * (B / A)
             match = re.search(r'(\d+)\s*:\s*(\d+)', purpose)
             if match:
                 try:
-                    new_share_a = float(match.group(1))
-                    old_share_b = float(match.group(2))
-                    if old_share_b > 0:
-                        ratio = new_share_a / old_share_b
+                    old_share_a = float(match.group(1))
+                    new_share_b = float(match.group(2))
+                    if old_share_a > 0:
+                        ratio = new_share_b / old_share_a
                         results.append({
                             'script_code': script_code,
                             'ex_date': ex_date,
                             'action_type': 'Bonus',
                             'value': ratio,
-                            'details': f"Bonus {int(new_share_a)}:{int(old_share_b)}"
+                            'details': f"Bonus {int(old_share_a)}:{int(new_share_b)} (Old:New)"
                         })
                 except ValueError:
                     pass
@@ -78,9 +82,6 @@ def parse_corporate_action(file_obj, start_date, end_date):
             # Extract DPS
             dps = 0.0
             found_dps = False
-
-            # User specific pattern: "Interim Dividend - Rs. - 0.8000"
-            # Regex: Rs\.?\s*-\s*([0-9.]+)
 
             # Pattern 1: Strict "Rs. - 0.80"
             match = re.search(r'Rs\.?\s*-\s*(\d+(?:\.\d+)?)', purpose, re.IGNORECASE)
