@@ -16,7 +16,7 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
             dividends = group[group['action_type'] == 'Dividend']
 
             corp_actions[script_code] = {
-                'bonus_ratios': bonuses['value'].tolist(), # List of ratios
+                'bonus_ratios': bonuses['value'].tolist(), # List of ratios (New/Old)
                 'total_dps': dividends['value'].sum()
             }
 
@@ -81,7 +81,7 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
 
     exceptions = []
 
-    # Pre-calculate Expected Bonus for Verification (but reverted logic uses Input Bonus for Closing Calc)
+    # Pre-calculate Expected Bonus for Verification using Corp Action
     isin_bonus_map = {}
     for _, row in shares_agg.iterrows():
         isin = row['isin']
@@ -105,7 +105,9 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         agg_opening = row['opening_units']
         agg_purchase = row['purchase_units']
         agg_sales = row['sales_units']
-        agg_bonus = row['bonus_recd'] # Input Bonus
+
+        # Use Expected Bonus from Corporate Action
+        expected_bonus = isin_bonus_map.get(isin, 0.0)
 
         manual = manual_map.get(isin)
         is_reit_repayment = False
@@ -114,12 +116,12 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
 
         if is_reit_repayment:
             # REIT Rule: Closing = Opening + Purchase + Bonus (Ignore Sales)
-            # Reverted: Use agg_bonus (Input Bonus)
-            calc_closing = agg_opening + agg_purchase + agg_bonus
+            # Use Expected Bonus
+            calc_closing = agg_opening + agg_purchase + expected_bonus
             used_sales = 0
         else:
             # Standard Rule: Closing = Opening + Purchase + Bonus - Sales
-            calc_closing = agg_opening + agg_purchase + agg_bonus - agg_sales
+            calc_closing = agg_opening + agg_purchase + expected_bonus - agg_sales
             used_sales = agg_sales
 
         formula_diff = agg_closing - calc_closing
@@ -129,9 +131,10 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         port_match = abs(port_diff) < 0.01
 
         res_closing.append({
-            'ISIN': isin, 'Script Code': row.get('script_code', ''),
+            'ISIN': isin, 'Script Code': row.get('script_code', ''), 'Name': row.get('name', ''),
             'Opening Units': agg_opening, 'Purchase Units': agg_purchase,
-            'Bonus Units': agg_bonus, 'Sales Units': agg_sales, 'Used Sales': used_sales,
+            'Expected Bonus': expected_bonus,
+            'Sales Units': agg_sales, 'Used Sales': used_sales,
             'Calc Closing': calc_closing, 'Input Agg Closing': agg_closing,
             'Formula Diff': formula_diff, 'Formula Match': formula_match,
             'Portfolio Closing': port_closing, 'Port Diff': port_diff, 'Port Match': port_match,
@@ -139,7 +142,7 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         })
 
         if not formula_match:
-            exceptions.append({'ISIN': isin, 'Script': row.get('script_code', ''), 'Issue': 'Closing Units Formula Mismatch', 'Details': f"Calc: {calc_closing}, Input: {agg_closing}"})
+            exceptions.append({'ISIN': isin, 'Script': row.get('script_code', ''), 'Issue': 'Closing Units Formula Mismatch', 'Details': f"Calc: {calc_closing}, Input: {agg_closing} (Using Expected Bonus: {expected_bonus})"})
         if not port_match:
             exceptions.append({'ISIN': isin, 'Script': row.get('script_code', ''), 'Issue': 'Portfolio Closing Mismatch', 'Details': f"Input: {agg_closing}, Port: {port_closing}"})
 
@@ -168,13 +171,15 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
                 validation_status = "Mismatch"
                 exceptions.append({'ISIN': isin, 'Script': row.get('script_code', ''), 'Issue': 'REIT Repayment Mismatch', 'Details': f"Sales Amt: {agg_sales_amt}, Expected: {expected_repayment}"})
 
+        # REIT Logic Check: User said "Closing Amount = Opening + Purchase - Sales".
+        # Do NOT subtract Repayment again.
         calc_closing_amt = agg_opening_amt + agg_purchase_amt - agg_sales_amt
 
         diff = agg_closing_amt - calc_closing_amt
         match = abs(diff) < 1.0
 
         res_amount.append({
-            'ISIN': isin, 'Script Code': row.get('script_code', ''),
+            'ISIN': isin, 'Script Code': row.get('script_code', ''), 'Name': row.get('name', ''),
             'Opening Amt': agg_opening_amt, 'Purchase Amt': agg_purchase_amt,
             'Sales Amt': agg_sales_amt,
             'Repayment Rate': repay_rate,
@@ -194,7 +199,7 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         isin = row['isin']
         script = str(row.get('script_code', '')).strip()
         agg_opening = row['opening_units']
-        agg_bonus = row['bonus_recd']
+        agg_bonus = row['bonus_recd'] # Input Bonus
 
         expected_bonus = isin_bonus_map.get(isin, 0.0)
 
@@ -202,7 +207,7 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         match = abs(diff) < 0.01
 
         res_bonus.append({
-            'ISIN': isin, 'Script Code': script,
+            'ISIN': isin, 'Script Code': script, 'Name': row.get('name', ''),
             'Agg Opening Units': agg_opening, 'Agg Input Bonus': agg_bonus,
             'Expected Bonus': expected_bonus, 'Diff': diff, 'Match': match
         })
@@ -240,7 +245,7 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
             match = False
 
         res_dividend.append({
-            'ISIN': isin, 'Script Code': script,
+            'ISIN': isin, 'Script Code': script, 'Name': row.get('name', ''),
             'Agg Closing Units': agg_closing, 'Source': source, 'Total DPS': total_dps,
             'Agg Input Dividend': agg_dividend, 'Expected Dividend': expected_dividend,
             'Diff': diff, 'Match': match
@@ -271,20 +276,23 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
             bhav_price = bhav_map[isin]
             price_found = True
         else:
-            # Check raw df logic removed for brevity, assume exception
-            exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'Bhav Price Missing', 'Details': "ISIN not found in Bhav Copy"})
+            # Check for Bhav missing only if input MV is significant? Or always?
+            # Always check is safer.
+            pass
 
         if not price_found:
              price_diff = input_price - 0
              price_match = False
+             # Add exception here directly
+             exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'Bhav Price Missing', 'Details': "ISIN not found in Bhav Copy"})
         else:
             price_diff = input_price - bhav_price
-            price_match = abs(price_diff) < 1.0
+            price_match = abs(price_diff) < 1.0 # Price Tolerance < 1.0
 
         expected_mv = closing_units * bhav_price
         mv_diff = input_mv - expected_mv
 
-        # Accumulate Expected MV for ISIN
+        # Accumulate Expected MV for ISIN (for UGL calculation)
         isin_expected_mv_map[isin] = isin_expected_mv_map.get(isin, 0.0) + expected_mv
 
         if expected_mv != 0:
@@ -324,22 +332,22 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
 
         ugl_diff = calc_ugl - agg_input_ugl
 
-        if abs(ugl_diff) <= 2:
+        if abs(ugl_diff) <= 2: # Tolerance Rule <= 2
             match = True
             ugl_diff = 0.0
         else:
             match = False
 
         res_ugl.append({
-            'ISIN': isin, 'Script Code': row.get('script_code', ''),
+            'ISIN': isin, 'Script Code': row.get('script_code', ''), 'Name': row.get('name', ''),
             'Closing Amount': agg_closing_amt, 'Expected MV': agg_expected_mv,
             'Calculated UGL': calc_ugl, 'Input UGL': agg_input_ugl,
             'UGL Diff': ugl_diff, 'UGL Match': match
         })
 
-        if not match:
-            # We add to exceptions
-            pass
+        # Append UGL exceptions
+        # We need to add to df_exceptions or rebuild it.
+        # Since we are iterating, we can just collect dicts and concat.
 
     df_ugl = pd.DataFrame(res_ugl)
 

@@ -52,21 +52,21 @@ def parse_corporate_action(file_obj, start_date, end_date):
 
         # Bonus Logic
         if "bonus issue" in purpose_lower:
-            # Reverted Logic: Group 1 = New (A), Group 2 = Old (B)
-            # Ratio = New / Old = A / B
+            # Format: A:B -> A = Old, B = New (User specified)
+            # Formula: Bonus = Opening * (New / Old) = Opening * (B / A)
             match = re.search(r'(\d+)\s*:\s*(\d+)', purpose)
             if match:
                 try:
-                    new_share_a = float(match.group(1))
-                    old_share_b = float(match.group(2))
-                    if old_share_b > 0:
-                        ratio = new_share_a / old_share_b
+                    share_a_old = float(match.group(1))
+                    share_b_new = float(match.group(2))
+                    if share_a_old > 0:
+                        ratio = share_b_new / share_a_old
                         results.append({
                             'script_code': script_code,
                             'ex_date': ex_date,
                             'action_type': 'Bonus',
                             'value': ratio,
-                            'details': f"Bonus {int(new_share_a)}:{int(old_share_b)}"
+                            'details': f"Bonus {int(share_a_old)}:{int(share_b_new)} (Old:New)"
                         })
                 except ValueError:
                     pass
