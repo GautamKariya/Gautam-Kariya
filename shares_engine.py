@@ -61,8 +61,7 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         if c not in shares_df.columns:
             shares_df[c] = 0.0
 
-    # Aggregation for Closing/Bonus/Dividend + Unit/Amount Verification
-    # Sum all relevant columns
+    # Aggregation
     agg_cols = [
         'opening_units', 'opening_amount',
         'purchase_units', 'purchase_amount',
@@ -89,13 +88,26 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         agg_closing = row['closing_units']
         port_closing = portfolio_map.get(isin, 0.0)
 
-        # Formula Check: Opening + Purchase + Bonus - Sales
         agg_opening = row['opening_units']
         agg_purchase = row['purchase_units']
         agg_sales = row['sales_units']
         agg_bonus = row['bonus_recd']
 
-        calc_closing = agg_opening + agg_purchase + agg_bonus - agg_sales
+        # Check if REIT (Repayment Rate > 0)
+        manual = manual_map.get(isin)
+        is_reit_repayment = False
+        if manual and manual['repay_rate'] > 0:
+            is_reit_repayment = True
+
+        # Formula Calculation
+        if is_reit_repayment:
+            # REIT Repayment Rule: Ignore Sales Units for closing unit calculation. Units do NOT reduce.
+            calc_closing = agg_opening + agg_purchase + agg_bonus # + 0 sales logic
+            used_sales = 0 # For report clarity
+        else:
+            calc_closing = agg_opening + agg_purchase + agg_bonus - agg_sales
+            used_sales = agg_sales
+
         formula_diff = agg_closing - calc_closing
         formula_match = abs(formula_diff) < 0.01
 
@@ -106,10 +118,11 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         res_closing.append({
             'ISIN': isin, 'Script Code': row.get('script_code', ''),
             'Opening Units': agg_opening, 'Purchase Units': agg_purchase,
-            'Bonus Units': agg_bonus, 'Sales Units': agg_sales,
+            'Bonus Units': agg_bonus, 'Sales Units': agg_sales, 'Used Sales': used_sales,
             'Calc Closing': calc_closing, 'Input Agg Closing': agg_closing,
             'Formula Diff': formula_diff, 'Formula Match': formula_match,
-            'Portfolio Closing': port_closing, 'Port Diff': port_diff, 'Port Match': port_match
+            'Portfolio Closing': port_closing, 'Port Diff': port_diff, 'Port Match': port_match,
+            'Is REIT': is_reit_repayment
         })
 
         if not formula_match:
@@ -130,10 +143,9 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         agg_sales_amt = row['sales_amount']
 
         # Repayment
-        # Check Manual Input
         manual = manual_map.get(isin, {'div_rate': 0.0, 'repay_rate': 0.0})
         repay_rate = manual['repay_rate']
-        repayment_amt = row['opening_units'] * repay_rate # Per user: Opening Units * Repayment Rate
+        repayment_amt = row['opening_units'] * repay_rate
 
         # Formula: Opening + Purchase - Sales - Repayment
         calc_closing_amt = agg_opening_amt + agg_purchase_amt - agg_sales_amt - repayment_amt
@@ -189,13 +201,11 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         agg_closing = row['closing_units']
         agg_dividend = row['dividend_recd']
 
-        # Check Manual Input First
         manual = manual_map.get(isin)
         if manual and manual['div_rate'] > 0:
             total_dps = manual['div_rate']
             source = "Manual"
         else:
-            # Corp Action
             ca = corp_actions.get(script, {'bonus_ratios': [], 'total_dps': 0.0})
             total_dps = ca['total_dps']
             source = "Corp Action"
@@ -236,7 +246,6 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         input_price = row.get('market_price', 0.0)
         input_mv = row.get('market_value', 0.0)
 
-        # Bhav Price Lookup
         price_found = False
         bhav_price = 0.0
 
@@ -246,7 +255,6 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         else:
             exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'Bhav Price Missing', 'Details': "ISIN not found in Bhav Copy"})
 
-        # Price Verification
         if not price_found:
              price_diff = input_price - 0
              price_match = False
@@ -254,7 +262,6 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
             price_diff = input_price - bhav_price
             price_match = abs(price_diff) < 1.0
 
-        # MV Verification
         expected_mv = closing_units * bhav_price
         mv_diff = input_mv - expected_mv
 
@@ -279,7 +286,6 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
             'MV Diff': mv_diff, 'MV Diff %': mv_diff_pct, 'MV Match': mv_match
         })
 
-        # UGL Calculation
         calculated_ugl = expected_mv - closing_amount
 
         res_ugl.append({
@@ -295,7 +301,8 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
 
     summary = {
         'Total ISINs (Agg)': len(shares_agg),
-        'Closing Units Mismatches': len(df_closing[~df_closing['Port Match']]), # Check Portfolio Match primarily? Or Formula? Usually Portfolio.
+        'Total Input Rows': len(shares_df),
+        'Closing Units Mismatches': len(df_closing[~df_closing['Port Match']]),
         'Closing Amount Mismatches': len(df_amount[~df_amount['Match']]),
         'Bonus Mismatches': len(df_bonus[~df_bonus['Match']]),
         'Dividend Mismatches': len(df_dividend[~df_dividend['Match']]),

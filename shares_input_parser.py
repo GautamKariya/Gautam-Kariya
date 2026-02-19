@@ -98,7 +98,7 @@ def parse_shares_input(file_obj):
         elif 'mkt value' in col_clean or 'market value' in col_clean:
             found_cols['market_value'] = col
 
-        # UGL (Optional, but useful to have)
+        # UGL
         elif 'un-realised' in col_clean or 'unrealised' in col_clean or 'unrealized' in col_clean:
             found_cols['ugl'] = col
 
@@ -114,17 +114,15 @@ def parse_shares_input(file_obj):
     # Filter Rows
     if 'isin' in df_clean.columns:
         df_clean['isin'] = df_clean['isin'].astype(str).str.strip().str.upper()
+        # Drop rows where ISIN is NaN
         df_clean = df_clean.dropna(subset=['isin'])
-        # User said "Work for Any listed security", but originally "Process only ISIN starting with INE".
-        # Current prompt "ISIN is unique... works for EQ, RR, BE". All start with INE/INF/IN.
-        # Let's keep strict ISIN format check but allow all IN*.
-        df_clean = df_clean[df_clean['isin'].str.startswith('IN')]
+        # Updated Rule: Do NOT filter by prefix. Process ALL ISINs.
+        # df_clean = df_clean[df_clean['isin'].str.startswith('IN')] # REMOVED
 
     if 'name' in df_clean.columns:
         df_clean = df_clean[~df_clean['name'].astype(str).str.contains('total', case=False, na=False)]
 
     # Standardize Numerics
-    # Add potentially missing optional columns with 0
     all_numeric_cols = [
         'opening_units', 'opening_amount',
         'purchase_units', 'purchase_amount',

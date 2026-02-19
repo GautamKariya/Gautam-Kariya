@@ -46,8 +46,10 @@ def parse_portfolio_html(file_obj):
                 # Check next cell for value
                 if i + 1 < len(cell_texts):
                     val = cell_texts[i+1].strip()
-                    # Basic validation: starts with 'IN' (usually INE or INF) and length > 5
-                    if len(val) > 5 and val.upper().startswith('IN'):
+                    # Basic validation: length > 5
+                    # Updated Rule: Do NOT filter by prefix like INE only.
+                    # Just check length and maybe alphanumeric?
+                    if len(val) > 5:
                         current_isin = val.upper()
                         isin_found_in_row = True
                         break
@@ -68,9 +70,6 @@ def parse_portfolio_html(file_obj):
                     continue
 
                 # Match Balance keywords
-                # Note: "Balance :" includes the colon. "Closing Balance :" includes colon.
-                # The user requirement: "Balance :" (transaction) or "Closing Balance :" (no transaction)
-
                 if "BALANCE :" in txt_upper or "CLOSING BALANCE :" in txt_upper:
                     # Found label.
 
@@ -87,7 +86,7 @@ def parse_portfolio_html(file_obj):
                         except ValueError:
                             pass
 
-                    # Strategy B: Value is embedded in the label cell text? (Unlikely per snippet, but robust)
+                    # Strategy B: Value is embedded in the label cell text
                     if not balance_found:
                          matches = re.findall(r'(\d+(?:\.\d+)?)', txt)
                          if matches:
@@ -111,11 +110,10 @@ def parse_portfolio_html(file_obj):
 
     df = pd.DataFrame(data)
 
-    # Filter for Equity Shares (INE)
-    # The snippet contained INF (Mutual Funds), we filter them out here as per requirement
-    df_ine = df[df['isin'].str.startswith('INE')].copy()
+    # Updated Rule: Do NOT filter by prefix.
+    # df = df[df['isin'].str.startswith('INE')] # REMOVED
 
     # Drop duplicates if any (keep last entry per ISIN just in case)
-    df_ine = df_ine.drop_duplicates(subset=['isin'], keep='last')
+    df = df.drop_duplicates(subset=['isin'], keep='last')
 
-    return df_ine, None
+    return df, None
