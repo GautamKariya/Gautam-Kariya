@@ -26,11 +26,27 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
         portfolio_map = portfolio_df.set_index('isin')['portfolio_closing_units'].to_dict()
 
     bhav_map = {}
+    bhav_raw_df = pd.DataFrame() # For fallback lookup
+
     if bhav_copy_df is not None and not bhav_copy_df.empty:
-        if 'ISIN' in bhav_copy_df.columns:
-            bhav_map = bhav_copy_df.set_index('ISIN')['bhav_close'].to_dict()
-        elif 'isin' in bhav_copy_df.columns:
-            bhav_map = bhav_copy_df.set_index('isin')['bhav_close'].to_dict()
+        # Bhav Copy is NOT filtered yet.
+        # User specified columns: ISIN (M), CLOSE (F), SERIES (B)
+        # Bhav Parser returns: ISIN, SERIES, bhav_close
+
+        # Keep raw for later lookup if needed
+        bhav_raw_df = bhav_copy_df.copy()
+
+        # Filter EQ Series
+        bhav_eq = bhav_copy_df[bhav_copy_df['SERIES'] == 'EQ'].copy()
+
+        # Handle Duplicates in EQ (should be unique but ensure)
+        bhav_eq = bhav_eq.drop_duplicates(subset=['ISIN'], keep='last')
+
+        # Create Map for EQ
+        if 'ISIN' in bhav_eq.columns:
+             bhav_map = bhav_eq.set_index('ISIN')['bhav_close'].to_dict()
+        elif 'isin' in bhav_eq.columns:
+             bhav_map = bhav_eq.set_index('isin')['bhav_close'].to_dict()
 
     # 3. Aggregation Step (ISIN Level)
     if shares_df is None or shares_df.empty:
@@ -117,10 +133,10 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
 
         diff = agg_dividend - expected_dividend
 
-        # New Rule: Dividend Tolerance <= 2 (Absolute)
+        # Dividend Tolerance Rule: ABS(Diff) <= 2
         if abs(diff) <= 2:
             match = True
-            diff = 0.0 # Force diff to 0 as requested ("Show Diff as 0")
+            diff = 0.0
         else:
             match = False
 
@@ -141,7 +157,7 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
     res_ugl = []
 
     for idx, row in shares_df.iterrows():
-        isin = row.get('isin', '')
+        isin = str(row.get('isin', '')).strip()
         script = str(row.get('script_code', '')).strip()
         name = row.get('name', '')
 
@@ -151,22 +167,36 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
         input_mv = row.get('market_value', 0.0)
 
         # Bhav Price Lookup
-        # Explicit check for missing key
+        price_found = False
+        bhav_price = 0.0
+
         if isin in bhav_map:
             bhav_price = bhav_map[isin]
             price_found = True
         else:
-            bhav_price = 0.0
+            # Not found in EQ map. Check if present in ANY series?
+            # For debug message precision.
+            if not bhav_raw_df.empty:
+                matches = bhav_raw_df[bhav_raw_df['ISIN'] == isin]
+                if not matches.empty:
+                    found_series = matches['SERIES'].unique()
+                    msg = f"ISIN Found in Series: {', '.join(found_series)} (Expected EQ)"
+                else:
+                    msg = "ISIN Not Found in Bhav Copy"
+            else:
+                msg = "Bhav Copy Empty"
+
+            # Log Exception
+            exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'Bhav Price Missing', 'Details': msg})
+
+            # Ensure price match is False
             price_found = False
+            bhav_price = 0.0
 
         # Price Verification
         if not price_found:
-             # Add specific exception for missing Bhav price
-             exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'Bhav Price Missing', 'Details': 'ISIN not found in EQ series'})
+             price_diff = input_price - bhav_price # Usually input_price - 0
              price_match = False
-             price_diff = 0.0 # Or mark as missing somehow? 0 diff is misleading if input price is 0.
-             # If input price > 0 and bhav 0, diff is input price.
-             price_diff = input_price - bhav_price
         else:
             price_diff = input_price - bhav_price
             price_match = abs(price_diff) < 1.0
@@ -178,7 +208,6 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
         if expected_mv != 0:
             mv_diff_pct = abs(mv_diff) / expected_mv
         else:
-            # If expected MV is 0 (price missing or units 0)
             if input_mv == 0:
                 mv_diff_pct = 0.0
             else:
@@ -188,7 +217,7 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df):
 
         if not mv_match:
              if not price_found:
-                 # Already logged Price Missing exception, maybe skip redundant MV mismatch log?
+                 # Already logged Price Missing
                  pass
              else:
                  exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'MV/Price Mismatch', 'Details': f"MV Diff %: {mv_diff_pct*100:.2f}% (Limit 1%), Price Diff: {price_diff:.2f}"})

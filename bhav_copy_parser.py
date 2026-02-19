@@ -6,17 +6,16 @@ def parse_bhav_copy(file_obj):
     file_obj: UploadedFile or path.
     """
     try:
+        # Read full file
         df = pd.read_csv(file_obj)
     except Exception as e:
         return None, f"Error reading Bhav Copy CSV: {str(e)}"
 
-    # Standardize column names
-    df.columns = [c.strip() for c in df.columns]
+    # Standardize column names (strip whitespace)
+    df.columns = [str(c).strip() for c in df.columns]
 
     # Check for required columns: ISIN, CLOSE, SERIES
-    # The user mentioned columns by name: ISIN (M), CLOSE (F), SERIES (B)
-    # But usually files have headers. We will use headers.
-
+    # User specified columns: ISIN, CLOSE, SERIES
     req_cols = ['ISIN', 'SERIES', 'CLOSE']
     col_map = {c.lower(): c for c in df.columns}
 
@@ -29,35 +28,32 @@ def parse_bhav_copy(file_obj):
         missing = [rc for rc in req_cols if rc.lower() not in col_map]
         return None, f"Missing columns in Bhav Copy CSV: {', '.join(missing)}"
 
+    # Rename to standard
     df = df.rename(columns={v: k for k, v in final_cols.items()})
 
-    # Filter for SERIES == 'EQ'
-    # Important: Do this BEFORE dropping duplicates or anything else
+    # Clean data (String columns)
+    # Strip whitespace from ISIN and SERIES
+    df['ISIN'] = df['ISIN'].astype(str).str.strip().str.upper()
     df['SERIES'] = df['SERIES'].astype(str).str.strip().str.upper()
 
-    # Filter EQ
-    df_eq = df[df['SERIES'] == 'EQ'].copy()
-
-    # Check if empty after filter
-    if df_eq.empty:
-        # Maybe no EQ rows? Warn but return empty?
-        pass
-
-    # Extract ISIN and CLOSE
     # Convert CLOSE to numeric
-    df_eq['CLOSE'] = pd.to_numeric(df_eq['CLOSE'], errors='coerce')
+    # Handle non-numeric gracefully (coerce to NaN then drop?)
+    # CLOSE should be float.
+    df['CLOSE'] = pd.to_numeric(df['CLOSE'], errors='coerce')
 
-    # Clean ISIN
-    df_eq['ISIN'] = df_eq['ISIN'].astype(str).str.strip().str.upper()
+    # Drop rows where required columns are NaN
+    df = df.dropna(subset=['ISIN', 'SERIES', 'CLOSE'])
 
-    # Select final columns
-    # We want ISIN -> CLOSE map.
-    # Drop NaNs in CLOSE or ISIN
-    df_clean = df_eq[['ISIN', 'CLOSE']].dropna()
-    df_clean = df_clean.rename(columns={'CLOSE': 'bhav_close'})
+    # Print Debug info (first 5 rows)
+    # print("DEBUG: Bhav Copy First 5 Rows:")
+    # print(df.head())
+    # print("DEBUG: Bhav Copy Columns:", df.columns.tolist())
 
-    # Handle duplicates (should be unique for EQ series per ISIN)
-    # If duplicates exist for EQ, take the first/last? Usually unique.
-    df_clean = df_clean.drop_duplicates(subset=['ISIN'], keep='last')
+    # Return Full DataFrame (ISIN, SERIES, CLOSE)
+    # We rename CLOSE to bhav_close to be explicit, but user said "Return CLOSE column value".
+    # I'll stick to 'CLOSE' or just map it later. Let's rename to match internal standard 'bhav_close'.
+    df = df.rename(columns={'CLOSE': 'bhav_close'})
 
-    return df_clean, None
+    # Select only needed columns?
+    # No, keep full just in case user wants more info later? But strict is better.
+    return df[['ISIN', 'SERIES', 'bhav_close']], None
