@@ -29,6 +29,25 @@ with col_up2:
     corp_action_file = st.file_uploader("Upload Corporate Action File (CSV)", type=['csv'])
     bhav_copy_file = st.file_uploader("Upload NSE Bhav Copy (CSV)", type=['csv'])
 
+st.markdown("### 3. Manual Input (REIT/Other)")
+st.caption("Optional: Add manual Dividend Rate or Repayment Rate for securities not in Corporate Action (e.g. REITs).")
+
+# Manual Input Table
+if 'manual_data' not in st.session_state:
+    st.session_state.manual_data = pd.DataFrame(columns=['ISIN', 'Dividend Rate', 'Repayment Rate'])
+
+# Editable Data Editor
+manual_df = st.data_editor(
+    st.session_state.manual_data,
+    num_rows="dynamic",
+    column_config={
+        "ISIN": st.column_config.TextColumn("ISIN", help="Enter ISIN (e.g. INE...)"),
+        "Dividend Rate": st.column_config.NumberColumn("Dividend Rate", help="DPS", format="%.4f"),
+        "Repayment Rate": st.column_config.NumberColumn("Repayment Rate", help="Repayment per Unit", format="%.4f"),
+    },
+    key="manual_input_editor"
+)
+
 if st.button("Run Shares Verification", type="primary"):
     if not (portfolio_file and shares_file and corp_action_file and bhav_copy_file):
         st.error("Please upload all 4 required files.")
@@ -65,7 +84,12 @@ if st.button("Run Shares Verification", type="primary"):
                 st.stop()
 
         with st.spinner("Running verification..."):
-            summary, results_df, exceptions_df = shares_engine.run_verification(shares_df, portfolio_df, corp_df, bhav_df)
+            # Prepare Manual Data
+            # manual_df comes from data_editor
+
+            summary, output_dfs, exceptions_df = shares_engine.run_verification(
+                shares_df, portfolio_df, corp_df, bhav_df, manual_df
+            )
 
         st.success("Verification Complete!")
 
@@ -81,7 +105,7 @@ if st.button("Run Shares Verification", type="primary"):
             st.info("No exceptions found.")
 
         # Download
-        excel_data = shares_engine.generate_excel_report(results_df, exceptions_df)
+        excel_data = shares_engine.generate_excel_report(output_dfs, exceptions_df)
 
         st.download_button(
             label="Download Working Paper (Excel)",
