@@ -98,14 +98,25 @@ def parse_shares_input(file_obj):
         elif 'mkt value' in col_clean or 'market value' in col_clean:
             found_cols['market_value'] = col
 
-        # UGL
-        elif 'un-realised' in col_clean or 'unrealised' in col_clean or 'unrealized' in col_clean:
+        # UGL - Correct Column Detection
+        # Match keywords: "un" AND "realised" (or realized) AND "gain"
+        # Or "un-realised"
+        if ('un' in col_clean and 'realised' in col_clean and 'gain' in col_clean) or \
+           ('un' in col_clean and 'realized' in col_clean and 'gain' in col_clean) or \
+           ('un-realised' in col_clean) or \
+           ('unrealised' in col_clean and 'gain' in col_clean):
             found_cols['ugl'] = col
 
     # Check mandatory columns
+    # UGL is mandatory for UGL verification, but user said "throw error" if conversion fails or column not found.
+    # We will check mandatory fields here.
     missing = [k for k in ['script_code', 'isin', 'opening_units', 'closing_units'] if k not in found_cols]
     if missing:
         return None, f"Missing columns: {', '.join(missing)}"
+
+    # Check UGL specifically to warn
+    if 'ugl' not in found_cols:
+        return None, "UN- Realised Gain/Loss column not detected in input file."
 
     # Select and Rename
     df_clean = df[list(found_cols.values())].copy()
@@ -114,10 +125,8 @@ def parse_shares_input(file_obj):
     # Filter Rows
     if 'isin' in df_clean.columns:
         df_clean['isin'] = df_clean['isin'].astype(str).str.strip().str.upper()
-        # Drop rows where ISIN is NaN
         df_clean = df_clean.dropna(subset=['isin'])
-        # Updated Rule: Do NOT filter by prefix. Process ALL ISINs.
-        # df_clean = df_clean[df_clean['isin'].str.startswith('IN')] # REMOVED
+        # No prefix filter (process all)
 
     if 'name' in df_clean.columns:
         df_clean = df_clean[~df_clean['name'].astype(str).str.contains('total', case=False, na=False)]
