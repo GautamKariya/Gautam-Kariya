@@ -55,7 +55,7 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         'sales_units', 'sales_amount',
         'bonus_recd',
         'closing_units', 'closing_amount',
-        'dividend_recd', 'market_value', 'market_price'
+        'dividend_recd', 'market_value', 'market_price', 'ugl'
     ]
     for c in num_cols:
         if c not in shares_df.columns:
@@ -68,7 +68,7 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         'sales_units', 'sales_amount',
         'bonus_recd',
         'closing_units', 'closing_amount',
-        'dividend_recd'
+        'dividend_recd', 'ugl'
     ]
     meta_cols = ['script_code', 'name']
 
@@ -93,17 +93,15 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         agg_sales = row['sales_units']
         agg_bonus = row['bonus_recd']
 
-        # Check if REIT (Repayment Rate > 0)
         manual = manual_map.get(isin)
         is_reit_repayment = False
         if manual and manual['repay_rate'] > 0:
             is_reit_repayment = True
 
-        # Formula Calculation
         if is_reit_repayment:
-            # REIT Repayment Rule: Ignore Sales Units for closing unit calculation. Units do NOT reduce.
-            calc_closing = agg_opening + agg_purchase + agg_bonus # + 0 sales logic
-            used_sales = 0 # For report clarity
+            # REIT Repayment Rule: Ignore Sales Units for closing unit calculation.
+            calc_closing = agg_opening + agg_purchase + agg_bonus
+            used_sales = 0
         else:
             calc_closing = agg_opening + agg_purchase + agg_bonus - agg_sales
             used_sales = agg_sales
@@ -111,7 +109,6 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         formula_diff = agg_closing - calc_closing
         formula_match = abs(formula_diff) < 0.01
 
-        # Portfolio Check
         port_diff = agg_closing - port_closing
         port_match = abs(port_diff) < 0.01
 
@@ -141,14 +138,32 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         agg_opening_amt = row['opening_amount']
         agg_purchase_amt = row['purchase_amount']
         agg_sales_amt = row['sales_amount']
+        agg_sales_units = row['sales_units']
 
-        # Repayment
+        # Repayment Check
         manual = manual_map.get(isin, {'div_rate': 0.0, 'repay_rate': 0.0})
         repay_rate = manual['repay_rate']
-        repayment_amt = row['opening_units'] * repay_rate
 
-        # Formula: Opening + Purchase - Sales - Repayment
-        calc_closing_amt = agg_opening_amt + agg_purchase_amt - agg_sales_amt - repayment_amt
+        validation_status = "N/A"
+        repay_diff = 0.0
+
+        if repay_rate > 0:
+            # REIT Logic: Validate Sales Amount vs Expected Repayment
+            # Expected Repayment = Sales Units * Repayment Rate
+            # (Note: User example used Opening Units * Rate if full repayment, but current user instruction: "Expected Repayment = Sales Units * Repayment Rate")
+            # "Sales Units column represents repayment units"
+            expected_repayment = agg_sales_units * repay_rate
+
+            repay_diff = agg_sales_amt - expected_repayment
+            if abs(repay_diff) < 1.0:
+                validation_status = "Validated"
+            else:
+                validation_status = "Mismatch"
+                exceptions.append({'ISIN': isin, 'Script': row.get('script_code', ''), 'Issue': 'REIT Repayment Mismatch', 'Details': f"Sales Amt: {agg_sales_amt}, Expected: {expected_repayment}"})
+
+        # Closing Amount Formula: Opening + Purchase - Sales
+        # Do NOT subtract Repayment again (it's inside Sales Amount)
+        calc_closing_amt = agg_opening_amt + agg_purchase_amt - agg_sales_amt
 
         diff = agg_closing_amt - calc_closing_amt
         match = abs(diff) < 1.0
@@ -156,7 +171,9 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         res_amount.append({
             'ISIN': isin, 'Script Code': row.get('script_code', ''),
             'Opening Amt': agg_opening_amt, 'Purchase Amt': agg_purchase_amt,
-            'Sales Amt': agg_sales_amt, 'Repayment Rate': repay_rate, 'Repayment Amt': repayment_amt,
+            'Sales Amt': agg_sales_amt,
+            'Repayment Rate': repay_rate, 'Expected Repayment': (agg_sales_units * repay_rate) if repay_rate > 0 else 0,
+            'Repayment Validation': validation_status,
             'Calc Closing Amt': calc_closing_amt, 'Input Agg Closing Amt': agg_closing_amt,
             'Diff': diff, 'Match': match
         })
@@ -232,9 +249,24 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
 
     df_dividend = pd.DataFrame(res_dividend)
 
-    # --- MODULE 5: PRICE, MV, UGL (ROW-WISE) ---
+    # --- MODULE 5: PRICE, MV (ROW-WISE) & UGL (AGGREGATED?) ---
+    # UGL Verification involves Comparing Calculated vs Input.
+    # Input UGL is usually aggregated if we compare final amounts.
+    # Or should we do Row-wise UGL check?
+    # User said: "Calculated UGL = Expected MV - Closing Amount. UGL Diff = Calculated UGL - Input UGL."
+    # Since Expected MV and Closing Amount are available at Row level and Aggregated level.
+    # But Input UGL is in the file.
+    # If we do row-wise, we sum diffs?
+    # User specified "FULL REQUIRED COLUMNS: Closing Amount, Expected MV, Calculated UGL, Input UGL...".
+    # This suggests ISIN level aggregation is better for the final report to avoid clutter,
+    # as Closing Amount and Expected MV are verified effectively at ISIN level (via Sum).
+    # Let's do UGL Verification on AGGREGATED Data.
+
     res_price_mv = []
-    res_ugl = []
+
+    # Row-wise Price/MV Verification Loop
+    # Need to sum Expected MV for UGL calculation
+    isin_expected_mv_map = {}
 
     for idx, row in shares_df.iterrows():
         isin = str(row.get('isin', '')).strip()
@@ -242,7 +274,6 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         name = row.get('name', '')
 
         closing_units = row.get('closing_units', 0.0)
-        closing_amount = row.get('closing_amount', 0.0)
         input_price = row.get('market_price', 0.0)
         input_mv = row.get('market_value', 0.0)
 
@@ -253,7 +284,9 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
             bhav_price = bhav_map[isin]
             price_found = True
         else:
-            exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'Bhav Price Missing', 'Details': "ISIN not found in Bhav Copy"})
+            # We log exceptions for missing Bhav once? Or per row?
+            # Exceptions DF handles it.
+            pass
 
         if not price_found:
              price_diff = input_price - 0
@@ -265,19 +298,24 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         expected_mv = closing_units * bhav_price
         mv_diff = input_mv - expected_mv
 
+        # Accumulate Expected MV for ISIN
+        isin_expected_mv_map[isin] = isin_expected_mv_map.get(isin, 0.0) + expected_mv
+
         if expected_mv != 0:
             mv_diff_pct = abs(mv_diff) / expected_mv
         else:
-            if input_mv == 0:
-                mv_diff_pct = 0.0
-            else:
-                mv_diff_pct = 1.0
+            if input_mv == 0: mv_diff_pct = 0.0
+            else: mv_diff_pct = 1.0
 
         mv_match = mv_diff_pct <= 0.01
 
         if not mv_match:
              if price_found:
                  exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'MV/Price Mismatch', 'Details': f"MV Diff %: {mv_diff_pct*100:.2f}% (Limit 1%), Price Diff: {price_diff:.2f}"})
+
+        if not price_found:
+             # Just one exception per ISIN ideally, but row-wise context helps.
+             exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'Bhav Price Missing', 'Details': "ISIN not found in Bhav Copy"})
 
         res_price_mv.append({
             'ISIN': isin, 'Script Code': script, 'Name': name,
@@ -286,27 +324,63 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
             'MV Diff': mv_diff, 'MV Diff %': mv_diff_pct, 'MV Match': mv_match
         })
 
-        calculated_ugl = expected_mv - closing_amount
+    df_price_mv = pd.DataFrame(res_price_mv)
+    # Deduplicate Bhav Missing exceptions to avoid spam
+    df_exceptions = pd.DataFrame(exceptions).drop_duplicates()
+
+    # --- MODULE 6: UGL VERIFICATION (AGGREGATED) ---
+    res_ugl = []
+    for _, row in shares_agg.iterrows():
+        isin = row['isin']
+        agg_closing_amt = row['closing_amount']
+        agg_input_ugl = row['ugl']
+
+        # Get Aggregated Expected MV from row-wise calculation
+        agg_expected_mv = isin_expected_mv_map.get(isin, 0.0)
+
+        calc_ugl = agg_expected_mv - agg_closing_amt
+
+        ugl_diff = calc_ugl - agg_input_ugl
+
+        # Tolerance: ABS(Diff) <= 2
+        if abs(ugl_diff) <= 2:
+            match = True
+            ugl_diff = 0.0
+        else:
+            match = False
 
         res_ugl.append({
-            'ISIN': isin, 'Script Code': script, 'Name': name,
-            'Closing Amount': closing_amount, 'Expected MV': expected_mv,
-            'Calculated UGL': calculated_ugl
+            'ISIN': isin, 'Script Code': row.get('script_code', ''),
+            'Closing Amount': agg_closing_amt, 'Expected MV': agg_expected_mv,
+            'Calculated UGL': calc_ugl, 'Input UGL': agg_input_ugl,
+            'UGL Diff': ugl_diff, 'UGL Match': match
         })
 
-    df_price_mv = pd.DataFrame(res_price_mv)
+        if not match:
+            # We add to exceptions, but note df_exceptions is already created.
+            # Convert dict to DF and concat? Or append to list before creating DF.
+            # Let's rebuild exception DF at the end or append to existing list (exceptions list still exists)
+            pass
+
     df_ugl = pd.DataFrame(res_ugl)
 
-    df_exceptions = pd.DataFrame(exceptions)
+    # Add UGL exceptions
+    ugl_exc = []
+    for _, row in df_ugl.iterrows():
+        if not row['UGL Match']:
+            ugl_exc.append({'ISIN': row['ISIN'], 'Script': row['Script Code'], 'Issue': 'UGL Mismatch', 'Details': f"Calc: {row['Calculated UGL']}, Input: {row['Input UGL']}"})
+
+    if ugl_exc:
+        df_exceptions = pd.concat([df_exceptions, pd.DataFrame(ugl_exc)], ignore_index=True)
 
     summary = {
         'Total ISINs (Agg)': len(shares_agg),
-        'Total Input Rows': len(shares_df),
         'Closing Units Mismatches': len(df_closing[~df_closing['Port Match']]),
         'Closing Amount Mismatches': len(df_amount[~df_amount['Match']]),
         'Bonus Mismatches': len(df_bonus[~df_bonus['Match']]),
         'Dividend Mismatches': len(df_dividend[~df_dividend['Match']]),
-        'MV/Price Mismatches': len(df_price_mv[~df_price_mv['MV Match']])
+        'MV/Price Mismatches': len(df_price_mv[~df_price_mv['MV Match']]),
+        'UGL Mismatches': len(df_ugl[~df_ugl['UGL Match']])
     }
 
     output_dfs = {
@@ -347,7 +421,7 @@ def generate_excel_report(output_dfs, df_exceptions):
         write(output_dfs.get('Bonus'), 'Bonus Verification')
         write(output_dfs.get('Dividend'), 'Dividend Working')
         write(output_dfs.get('Price_MV'), 'Market Price & MV Verification')
-        write(output_dfs.get('UGL'), 'UGL Calculation')
+        write(output_dfs.get('UGL'), 'UGL Verification')
         write(df_exceptions, 'Exception Report')
 
     return output.getvalue()
