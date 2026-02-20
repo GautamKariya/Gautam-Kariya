@@ -4,386 +4,362 @@ from io import BytesIO
 
 def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manual_df=None):
     """
-    Runs the verification logic using Hybrid Approach.
+    Runs the verification logic using Hybrid Approach with STRICT Validation and UPPERCASE Normalization.
     """
 
-    # 1. Pre-process Corporate Actions
-    corp_actions = {}
+    # --- 0. NORMALIZATION & PRE-EXECUTION CHECKS ---
+
+    # Normalize Input Columns to Uppercase
+    if shares_df is not None:
+        shares_df.columns = [str(c).strip().upper() for c in shares_df.columns]
+    if portfolio_df is not None:
+        portfolio_df.columns = [str(c).strip().upper() for c in portfolio_df.columns]
+    if corp_action_df is not None:
+        corp_action_df.columns = [str(c).strip().upper() for c in corp_action_df.columns]
+    if bhav_copy_df is not None:
+        bhav_copy_df.columns = [str(c).strip().upper() for c in bhav_copy_df.columns]
+    if manual_df is not None:
+        manual_df.columns = [str(c).strip().upper() for c in manual_df.columns]
+
+    # Required Columns (Using Uppercase)
+    required_shares_cols = [
+        'ISIN', 'SCRIPT_CODE', 'OPENING_UNITS', 'CLOSING_UNITS',
+        'CLOSING_AMOUNT', 'DIVIDEND_RECD', 'UGL', 'MARKET_VALUE',
+        'PURCHASE_UNITS', 'SALES_UNITS', 'BONUS_RECD'
+    ]
+    missing_shares = [c for c in required_shares_cols if c not in shares_df.columns]
+    if missing_shares:
+        raise ValueError(f"STOP: Missing mandatory columns in Shares Input: {', '.join(missing_shares)}")
+
+    required_bhav_cols = ['ISIN', 'BHAV_CLOSE']
+    missing_bhav = [c for c in required_bhav_cols if c not in bhav_copy_df.columns]
+    if missing_bhav:
+        raise ValueError(f"STOP: Missing mandatory columns in Bhav Copy: {', '.join(missing_bhav)}")
+
     if corp_action_df is not None and not corp_action_df.empty:
-        # Group by script_code
-        for script_code, group in corp_action_df.groupby('script_code'):
-            bonuses = group[group['action_type'] == 'Bonus']
-            dividends = group[group['action_type'] == 'Dividend']
+        required_ca_cols = ['SCRIPT_CODE', 'ACTION_TYPE', 'VALUE']
+        missing_ca = [c for c in required_ca_cols if c not in corp_action_df.columns]
+        if missing_ca:
+            raise ValueError(f"STOP: Missing mandatory columns in Corp Action: {', '.join(missing_ca)}")
 
-            corp_actions[script_code] = {
-                'bonus_ratios': bonuses['value'].tolist(), # List of ratios (New/Old)
-                'total_dps': dividends['value'].sum()
-            }
+    # --- 1. AGGREGATION (STRICT) ---
 
-    # 2. Pre-process Manual Data (REIT)
-    manual_map = {}
-    if manual_df is not None and not manual_df.empty:
-        # Map ISIN -> {Dividend Rate, Repayment Rate}
-        for _, row in manual_df.iterrows():
-            isin_key = str(row.get('ISIN', '')).strip().upper()
-            if isin_key:
-                manual_map[isin_key] = {
-                    'div_rate': float(row.get('Dividend Rate', 0.0) or 0.0),
-                    'repay_rate': float(row.get('Repayment Rate', 0.0) or 0.0)
-                }
+    agg_dict = {
+        'OPENING_UNITS': 'sum',
+        'PURCHASE_UNITS': 'sum',
+        'BONUS_RECD': 'sum',
+        'SALES_UNITS': 'sum',
+        'CLOSING_UNITS': 'sum',
 
-    # 3. Pre-process Portfolio and Bhav Copy
-    portfolio_map = {}
-    if portfolio_df is not None and not portfolio_df.empty:
-        portfolio_map = portfolio_df.set_index('isin')['portfolio_closing_units'].to_dict()
+        'OPENING_AMOUNT': 'sum',
+        'PURCHASE_AMOUNT': 'sum',
+        'SALES_AMOUNT': 'sum',
+        'CLOSING_AMOUNT': 'sum',
 
-    bhav_map = {}
-    if bhav_copy_df is not None and not bhav_copy_df.empty:
-        if 'ISIN' in bhav_copy_df.columns:
-            bhav_map = bhav_copy_df.set_index('ISIN')['bhav_close'].to_dict()
-        elif 'isin' in bhav_copy_df.columns:
-            bhav_map = bhav_copy_df.set_index('isin')['bhav_close'].to_dict()
+        'DIVIDEND_RECD': 'sum',
+        'UGL': 'sum',
+        'MARKET_VALUE': 'sum'
+    }
 
-    # 4. Aggregation Step (ISIN Level)
-    if shares_df is None or shares_df.empty:
-        return {'Error': 'No Shares Input'}, {}, pd.DataFrame()
-
-    # Ensure numeric columns
-    num_cols = [
-        'opening_units', 'opening_amount',
-        'purchase_units', 'purchase_amount',
-        'sales_units', 'sales_amount',
-        'bonus_recd',
-        'closing_units', 'closing_amount',
-        'dividend_recd', 'market_value', 'market_price', 'ugl'
-    ]
-    for c in num_cols:
-        if c not in shares_df.columns:
-            shares_df[c] = 0.0
-
-    # Aggregation
-    agg_cols = [
-        'opening_units', 'opening_amount',
-        'purchase_units', 'purchase_amount',
-        'sales_units', 'sales_amount',
-        'bonus_recd',
-        'closing_units', 'closing_amount',
-        'dividend_recd', 'ugl'
-    ]
-    meta_cols = ['script_code', 'name']
-
-    agg_dict = {c: 'sum' for c in agg_cols}
+    # Metadata
+    meta_cols = ['SCRIPT_CODE', 'NAME']
     for c in meta_cols:
         if c in shares_df.columns:
             agg_dict[c] = 'first'
 
-    shares_agg = shares_df.groupby('isin', as_index=False).agg(agg_dict)
+    # Check Agg keys
+    for k in agg_dict:
+        if k not in shares_df.columns and k not in meta_cols:
+             raise ValueError(f"STOP: Aggregation field '{k}' missing in input.")
+
+    shares_agg = shares_df.groupby('ISIN', as_index=False).agg(agg_dict)
+
+    if len(shares_agg) != shares_df['ISIN'].nunique():
+        raise ValueError("STOP: Aggregation failure detected. Unique ISIN count mismatch.")
+
+    # --- 2. PRE-PROCESS REFERENCE DATA ---
+
+    # Corp Actions
+    corp_actions = {}
+    if corp_action_df is not None and not corp_action_df.empty:
+        for script_code, group in corp_action_df.groupby('SCRIPT_CODE'):
+            bonuses = group[group['ACTION_TYPE'] == 'Bonus']
+            dividends = group[group['ACTION_TYPE'] == 'Dividend']
+
+            corp_actions[script_code] = {
+                'bonus_ratios': bonuses['VALUE'].tolist(),
+                'total_dps': dividends['VALUE'].sum()
+            }
+
+    # Portfolio Map
+    portfolio_map = {}
+    if portfolio_df is not None and not portfolio_df.empty:
+        portfolio_map = portfolio_df.set_index('ISIN')['PORTFOLIO_CLOSING_UNITS'].to_dict()
+
+    # Bhav Map (Strict)
+    bhav_map = {}
+    if not bhav_copy_df.empty:
+        bhav_map = bhav_copy_df.set_index('ISIN')['BHAV_CLOSE'].to_dict()
+
+    # Manual Map
+    manual_map = {}
+    if manual_df is not None and not manual_df.empty:
+        for _, row in manual_df.iterrows():
+            isin_key = str(row.get('ISIN', '')).strip().upper()
+            if isin_key:
+                manual_map[isin_key] = {
+                    'div_rate': float(row.get('DIVIDEND RATE', 0.0) or 0.0),
+                    'repay_rate': float(row.get('REPAYMENT RATE', 0.0) or 0.0)
+                }
+
+    # --- 3. VERIFICATION MODULES (AGGREGATED) ---
 
     exceptions = []
 
-    # Pre-calculate Expected Bonus for Verification using Corp Action
+    # Pre-calculate Expected Bonus
     isin_bonus_map = {}
     for _, row in shares_agg.iterrows():
-        isin = row['isin']
-        script = str(row.get('script_code', '')).strip()
-        agg_opening = row['opening_units']
+        isin = row['ISIN']
+        script = str(row.get('SCRIPT_CODE', '')).strip()
+        agg_opening = row['OPENING_UNITS']
 
         ca = corp_actions.get(script, {'bonus_ratios': [], 'total_dps': 0.0})
         expected_bonus = 0.0
         for ratio in ca['bonus_ratios']:
             expected_bonus += agg_opening * ratio
-
         isin_bonus_map[isin] = expected_bonus
 
-    # --- MODULE 1: CLOSING UNITS (AGGREGATED + FORMULA CHECK) ---
+    # MODULE A: CLOSING UNITS
     res_closing = []
     for _, row in shares_agg.iterrows():
-        isin = row['isin']
-        agg_closing = row['closing_units']
+        isin = row['ISIN']
+        agg_closing = row['CLOSING_UNITS']
         port_closing = portfolio_map.get(isin, 0.0)
 
-        agg_opening = row['opening_units']
-        agg_purchase = row['purchase_units']
-        agg_sales = row['sales_units']
+        agg_opening = row['OPENING_UNITS']
+        agg_purchase = row['PURCHASE_UNITS']
+        agg_sales = row['SALES_UNITS']
 
-        # Use Expected Bonus from Corporate Action
         expected_bonus = isin_bonus_map.get(isin, 0.0)
 
         manual = manual_map.get(isin)
-        is_reit_repayment = False
-        if manual and manual['repay_rate'] > 0:
-            is_reit_repayment = True
+        is_reit = manual and manual['repay_rate'] > 0
 
-        if is_reit_repayment:
-            # REIT Rule: Closing = Opening + Purchase + Bonus (Ignore Sales)
-            # Use Expected Bonus
+        if is_reit:
             calc_closing = agg_opening + agg_purchase + expected_bonus
             used_sales = 0
         else:
-            # Standard Rule: Closing = Opening + Purchase + Bonus - Sales
             calc_closing = agg_opening + agg_purchase + expected_bonus - agg_sales
             used_sales = agg_sales
 
-        formula_diff = agg_closing - calc_closing
-        formula_match = abs(formula_diff) < 0.01
+        form_diff = agg_closing - calc_closing
+        form_match = abs(form_diff) < 0.01
 
         port_diff = agg_closing - port_closing
         port_match = abs(port_diff) < 0.01
 
         res_closing.append({
-            'ISIN': isin, 'Script Code': row.get('script_code', ''), 'Name': row.get('name', ''),
-            'Opening Units': agg_opening, 'Purchase Units': agg_purchase,
-            'Expected Bonus': expected_bonus,
-            'Sales Units': agg_sales, 'Used Sales': used_sales,
-            'Calc Closing': calc_closing, 'Input Agg Closing': agg_closing,
-            'Formula Diff': formula_diff, 'Formula Match': formula_match,
-            'Portfolio Closing': port_closing, 'Port Diff': port_diff, 'Port Match': port_match,
-            'Is REIT': is_reit_repayment
+            'ISIN': isin, 'SCRIPT_CODE': row.get('SCRIPT_CODE', ''),
+            'CALC_CLOSING': calc_closing, 'INPUT_AGG_CLOSING': agg_closing,
+            'FORMULA_MATCH': form_match,
+            'PORTFOLIO_CLOSING': port_closing, 'PORT_MATCH': port_match
         })
 
-        if not formula_match:
-            exceptions.append({'ISIN': isin, 'Script': row.get('script_code', ''), 'Issue': 'Closing Units Formula Mismatch', 'Details': f"Calc: {calc_closing}, Input: {agg_closing} (Using Expected Bonus: {expected_bonus})"})
+        if not form_match:
+            exceptions.append({'ISIN': isin, 'Module': 'Closing Units', 'Match': False, 'Details': f"Formula Fail. Calc: {calc_closing}, Input: {agg_closing}"})
         if not port_match:
-            exceptions.append({'ISIN': isin, 'Script': row.get('script_code', ''), 'Issue': 'Portfolio Closing Mismatch', 'Details': f"Input: {agg_closing}, Port: {port_closing}"})
+            exceptions.append({'ISIN': isin, 'Module': 'Closing Units', 'Match': False, 'Details': f"Portfolio Fail. Port: {port_closing}, Input: {agg_closing}"})
 
-    df_closing = pd.DataFrame(res_closing)
-
-    # --- MODULE 2: CLOSING AMOUNT (AGGREGATED) ---
+    # MODULE B: CLOSING AMOUNT
     res_amount = []
     for _, row in shares_agg.iterrows():
-        isin = row['isin']
-        agg_closing_amt = row['closing_amount']
+        isin = row['ISIN']
+        agg_closing_amt = row['CLOSING_AMOUNT']
 
-        agg_opening_amt = row['opening_amount']
-        agg_purchase_amt = row['purchase_amount']
-        agg_sales_amt = row['sales_amount']
-        agg_sales_units = row['sales_units']
+        manual = manual_map.get(isin)
+        repay_rate = manual['repay_rate'] if manual else 0.0
 
-        manual = manual_map.get(isin, {'div_rate': 0.0, 'repay_rate': 0.0})
-        repay_rate = manual['repay_rate']
-
-        validation_status = "N/A"
+        repay_validation = "N/A"
         if repay_rate > 0:
-            expected_repayment = agg_sales_units * repay_rate
-            if abs(agg_sales_amt - expected_repayment) < 1.0:
-                validation_status = "Validated"
+            exp_repay = row['SALES_UNITS'] * repay_rate
+            if abs(row['SALES_AMOUNT'] - exp_repay) > 1.0:
+                repay_validation = "Mismatch"
+                exceptions.append({'ISIN': isin, 'Module': 'REIT Validation', 'Match': False, 'Details': f"Sales Amt {row['SALES_AMOUNT']} != Expected {exp_repay}"})
             else:
-                validation_status = "Mismatch"
-                exceptions.append({'ISIN': isin, 'Script': row.get('script_code', ''), 'Issue': 'REIT Repayment Mismatch', 'Details': f"Sales Amt: {agg_sales_amt}, Expected: {expected_repayment}"})
+                repay_validation = "Validated"
 
-        # REIT Logic Check: User said "Closing Amount = Opening + Purchase - Sales".
-        # Do NOT subtract Repayment again.
-        calc_closing_amt = agg_opening_amt + agg_purchase_amt - agg_sales_amt
+        calc_amt = row['OPENING_AMOUNT'] + row['PURCHASE_AMOUNT'] - row['SALES_AMOUNT']
 
-        diff = agg_closing_amt - calc_closing_amt
+        diff = agg_closing_amt - calc_amt
         match = abs(diff) < 1.0
 
         res_amount.append({
-            'ISIN': isin, 'Script Code': row.get('script_code', ''), 'Name': row.get('name', ''),
-            'Opening Amt': agg_opening_amt, 'Purchase Amt': agg_purchase_amt,
-            'Sales Amt': agg_sales_amt,
-            'Repayment Rate': repay_rate,
-            'Repayment Validation': validation_status,
-            'Calc Closing Amt': calc_closing_amt, 'Input Agg Closing Amt': agg_closing_amt,
-            'Diff': diff, 'Match': match
+            'ISIN': isin, 'CALC_CLOSING_AMT': calc_amt, 'INPUT_CLOSING_AMT': agg_closing_amt, 'MATCH': match, 'REPAY_VALID': repay_validation
         })
 
         if not match:
-             exceptions.append({'ISIN': isin, 'Script': row.get('script_code', ''), 'Issue': 'Closing Amount Mismatch', 'Details': f"Calc: {calc_closing_amt}, Input: {agg_closing_amt}"})
+            exceptions.append({'ISIN': isin, 'Module': 'Closing Amount', 'Match': False, 'Details': f"Calc: {calc_amt}, Input: {agg_closing_amt}"})
 
-    df_amount = pd.DataFrame(res_amount)
-
-    # --- MODULE 3: BONUS VERIFICATION (AGGREGATED) ---
+    # MODULE C: BONUS
     res_bonus = []
     for _, row in shares_agg.iterrows():
-        isin = row['isin']
-        script = str(row.get('script_code', '')).strip()
-        agg_opening = row['opening_units']
-        agg_bonus = row['bonus_recd'] # Input Bonus
+        isin = row['ISIN']
+        exp_bonus = isin_bonus_map.get(isin, 0.0)
+        inp_bonus = row['BONUS_RECD']
 
-        expected_bonus = isin_bonus_map.get(isin, 0.0)
-
-        diff = agg_bonus - expected_bonus
+        diff = inp_bonus - exp_bonus
         match = abs(diff) < 0.01
 
-        res_bonus.append({
-            'ISIN': isin, 'Script Code': script, 'Name': row.get('name', ''),
-            'Agg Opening Units': agg_opening, 'Agg Input Bonus': agg_bonus,
-            'Expected Bonus': expected_bonus, 'Diff': diff, 'Match': match
-        })
+        res_bonus.append({'ISIN': isin, 'EXPECTED_BONUS': exp_bonus, 'INPUT_BONUS': inp_bonus, 'MATCH': match})
 
         if not match:
-             exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'Bonus Mismatch', 'Details': f"Input: {agg_bonus}, Expected: {expected_bonus}"})
+            exceptions.append({'ISIN': isin, 'Module': 'Bonus', 'Match': False, 'Details': f"Exp: {exp_bonus}, Inp: {inp_bonus}"})
 
-    df_bonus = pd.DataFrame(res_bonus)
-
-    # --- MODULE 4: DIVIDEND (AGGREGATED) ---
+    # MODULE D: DIVIDEND
     res_dividend = []
     for _, row in shares_agg.iterrows():
-        isin = row['isin']
-        script = str(row.get('script_code', '')).strip()
-        agg_closing = row['closing_units']
-        agg_dividend = row['dividend_recd']
+        isin = row['ISIN']
+        script = str(row.get('SCRIPT_CODE', '')).strip()
+        agg_closing = row['CLOSING_UNITS']
+        inp_div = row['DIVIDEND_RECD']
 
         manual = manual_map.get(isin)
         if manual and manual['div_rate'] > 0:
             total_dps = manual['div_rate']
-            source = "Manual"
         else:
             ca = corp_actions.get(script, {'bonus_ratios': [], 'total_dps': 0.0})
             total_dps = ca['total_dps']
-            source = "Corp Action"
 
-        expected_dividend = agg_closing * total_dps
+        exp_div = agg_closing * total_dps
+        diff = inp_div - exp_div
+        match = abs(diff) <= 2.0
 
-        diff = agg_dividend - expected_dividend
-
-        if abs(diff) <= 2:
-            match = True
-            diff = 0.0
-        else:
-            match = False
-
-        res_dividend.append({
-            'ISIN': isin, 'Script Code': script, 'Name': row.get('name', ''),
-            'Agg Closing Units': agg_closing, 'Source': source, 'Total DPS': total_dps,
-            'Agg Input Dividend': agg_dividend, 'Expected Dividend': expected_dividend,
-            'Diff': diff, 'Match': match
-        })
+        res_dividend.append({'ISIN': isin, 'EXPECTED_DIVIDEND': exp_div, 'INPUT_DIVIDEND': inp_div, 'MATCH': match})
 
         if not match:
-            exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'Dividend Mismatch', 'Details': f"Input: {agg_dividend}, Expected: {expected_dividend}"})
+            exceptions.append({'ISIN': isin, 'Module': 'Dividend', 'Match': False, 'Details': f"Exp: {exp_div}, Inp: {inp_div}"})
 
-    df_dividend = pd.DataFrame(res_dividend)
-
-    # --- MODULE 5: PRICE, MV (ROW-WISE) ---
-    res_price_mv = []
+    # MODULE E: MARKET PRICE & VALUE (Using Row-wise logic, summed Expected MV for UGL)
+    res_mv_ugl = []
     isin_expected_mv_map = {}
 
+    # Temporary list for row-wise results to avoid ambiguity
+    res_row_mv = []
+
     for idx, row in shares_df.iterrows():
-        isin = str(row.get('isin', '')).strip()
-        script = str(row.get('script_code', '')).strip()
-        name = row.get('name', '')
+        isin = str(row.get('ISIN', '')).strip()
+        script = str(row.get('SCRIPT_CODE', '')).strip()
 
-        closing_units = row.get('closing_units', 0.0)
-        input_price = row.get('market_price', 0.0)
-        input_mv = row.get('market_value', 0.0)
+        closing_units = row.get('CLOSING_UNITS', 0.0)
+        input_price = row.get('MARKET_PRICE', 0.0)
+        input_mv = row.get('MARKET_VALUE', 0.0)
 
-        price_found = False
-        bhav_price = 0.0
+        if isin not in bhav_map:
+            raise ValueError(f"STOP: ISIN {isin} not found in Bhav Copy.")
 
-        if isin in bhav_map:
-            bhav_price = bhav_map[isin]
-            price_found = True
-        else:
-            # Check for Bhav missing only if input MV is significant? Or always?
-            # Always check is safer.
-            pass
+        bhav_price = bhav_map[isin]
 
-        if not price_found:
-             price_diff = input_price - 0
-             price_match = False
-             # Add exception here directly
-             exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'Bhav Price Missing', 'Details': "ISIN not found in Bhav Copy"})
-        else:
-            price_diff = input_price - bhav_price
-            price_match = abs(price_diff) < 1.0 # Price Tolerance < 1.0
+        price_diff = input_price - bhav_price
+        price_match = abs(price_diff) < 1.0
 
         expected_mv = closing_units * bhav_price
         mv_diff = input_mv - expected_mv
 
-        # Accumulate Expected MV for ISIN (for UGL calculation)
         isin_expected_mv_map[isin] = isin_expected_mv_map.get(isin, 0.0) + expected_mv
 
         if expected_mv != 0:
             mv_diff_pct = abs(mv_diff) / expected_mv
         else:
-            if input_mv == 0:
-                mv_diff_pct = 0.0
-            else:
-                mv_diff_pct = 1.0
+            mv_diff_pct = 0.0 if input_mv == 0 else 1.0
 
         mv_match = mv_diff_pct <= 0.01
 
         if not mv_match:
-             if price_found:
-                 exceptions.append({'ISIN': isin, 'Script': script, 'Issue': 'MV/Price Mismatch', 'Details': f"MV Diff %: {mv_diff_pct*100:.2f}% (Limit 1%), Price Diff: {price_diff:.2f}"})
+             exceptions.append({'ISIN': isin, 'Module': 'Market Value', 'Match': False, 'Details': f"Row MV Diff %: {mv_diff_pct*100:.2f}%"})
 
-        res_price_mv.append({
-            'ISIN': isin, 'Script Code': script, 'Name': name,
-            'Input Price': input_price, 'Bhav Price': bhav_price, 'Price Diff': price_diff,
-            'Input MV': input_mv, 'Expected MV': expected_mv,
-            'MV Diff': mv_diff, 'MV Diff %': mv_diff_pct, 'MV Match': mv_match
+        res_row_mv.append({
+            'ISIN': isin, 'SCRIPT_CODE': script,
+            'INPUT_PRICE': input_price, 'BHAV_PRICE': bhav_price, 'PRICE_MATCH': price_match,
+            'INPUT_MV': input_mv, 'EXPECTED_MV': expected_mv, 'MV_MATCH': mv_match
         })
 
-    df_price_mv = pd.DataFrame(res_price_mv)
-    df_exceptions = pd.DataFrame(exceptions).drop_duplicates()
-
-    # --- MODULE 6: UGL VERIFICATION (AGGREGATED) ---
-    res_ugl = []
+    # MODULE F: UGL (AGGREGATED)
     for _, row in shares_agg.iterrows():
-        isin = row['isin']
-        agg_closing_amt = row['closing_amount']
-        agg_input_ugl = row['ugl']
+        isin = row['ISIN']
+        agg_closing_amt = row['CLOSING_AMOUNT']
+        agg_input_ugl = row['UGL']
+        agg_input_mv = row['MARKET_VALUE']
 
         agg_expected_mv = isin_expected_mv_map.get(isin, 0.0)
 
-        calc_ugl = agg_expected_mv - agg_closing_amt
-
-        ugl_diff = calc_ugl - agg_input_ugl
-
-        if abs(ugl_diff) <= 2: # Tolerance Rule <= 2
-            match = True
-            ugl_diff = 0.0
+        # MV Aggregated Verification (for summary)
+        mv_agg_match = False
+        if agg_expected_mv != 0:
+            if (abs(agg_input_mv - agg_expected_mv) / agg_expected_mv) <= 0.01: mv_agg_match = True
         else:
-            match = False
+            if agg_input_mv == 0: mv_agg_match = True
 
-        res_ugl.append({
-            'ISIN': isin, 'Script Code': row.get('script_code', ''), 'Name': row.get('name', ''),
-            'Closing Amount': agg_closing_amt, 'Expected MV': agg_expected_mv,
-            'Calculated UGL': calc_ugl, 'Input UGL': agg_input_ugl,
-            'UGL Diff': ugl_diff, 'UGL Match': match
+        calc_ugl = agg_expected_mv - agg_closing_amt
+        ugl_diff = calc_ugl - agg_input_ugl
+        ugl_match = abs(ugl_diff) <= 2.0
+
+        res_mv_ugl.append({
+            'ISIN': isin, 'EXPECTED_MV': agg_expected_mv, 'INPUT_MV': agg_input_mv, 'MV_MATCH': mv_agg_match,
+            'CLOSING_AMOUNT': agg_closing_amt, 'CALCULATED_UGL': calc_ugl, 'INPUT_UGL': agg_input_ugl,
+            'UGL_MATCH': ugl_match
         })
 
-        # Append UGL exceptions
-        # We need to add to df_exceptions or rebuild it.
-        # Since we are iterating, we can just collect dicts and concat.
+        if not ugl_match:
+            exceptions.append({'ISIN': isin, 'Module': 'UGL', 'Match': False, 'Details': f"Calc: {calc_ugl}, Inp: {agg_input_ugl}"})
 
-    df_ugl = pd.DataFrame(res_ugl)
+    # --- 4. OUTPUT GENERATION ---
+    df_closing = pd.DataFrame(res_closing)
+    df_amount = pd.DataFrame(res_amount)
+    df_bonus = pd.DataFrame(res_bonus)
+    df_dividend = pd.DataFrame(res_dividend)
+    df_mv_ugl = pd.DataFrame(res_mv_ugl)
+    df_row_mv = pd.DataFrame(res_row_mv)
 
-    ugl_exc = []
-    for _, row in df_ugl.iterrows():
-        if not row['UGL Match']:
-            ugl_exc.append({'ISIN': row['ISIN'], 'Script': row['Script Code'], 'Issue': 'UGL Mismatch', 'Details': f"Calc: {row['Calculated UGL']}, Input: {row['Input UGL']}"})
+    # Exception Summary Sheet
+    summary_base = shares_agg[['ISIN']].copy()
 
-    if ugl_exc:
-        df_exceptions = pd.concat([df_exceptions, pd.DataFrame(ugl_exc)], ignore_index=True)
+    # Safety Check for Merge
+    for df, name in [(df_closing, 'Closing'), (df_bonus, 'Bonus'), (df_dividend, 'Div'), (df_mv_ugl, 'MV_UGL')]:
+        if 'ISIN' not in df.columns:
+            raise ValueError(f"STOP: ISIN column missing in {name} DataFrame before merge.")
 
-    summary = {
-        'Total ISINs (Agg)': len(shares_agg),
-        'Closing Units Mismatches': len(df_closing[~df_closing['Port Match']]),
-        'Closing Amount Mismatches': len(df_amount[~df_amount['Match']]),
-        'Bonus Mismatches': len(df_bonus[~df_bonus['Match']]),
-        'Dividend Mismatches': len(df_dividend[~df_dividend['Match']]),
-        'MV/Price Mismatches': len(df_price_mv[~df_price_mv['MV Match']]),
-        'UGL Mismatches': len(df_ugl[~df_ugl['UGL Match']])
-    }
+    summary_final = summary_base.merge(df_closing[['ISIN', 'PORT_MATCH']].rename(columns={'PORT_MATCH': 'CLOSING_MATCH'}), on='ISIN', how='left')
+    summary_final = summary_final.merge(df_bonus[['ISIN', 'MATCH']].rename(columns={'MATCH': 'BONUS_MATCH'}), on='ISIN', how='left')
+    summary_final = summary_final.merge(df_dividend[['ISIN', 'MATCH']].rename(columns={'MATCH': 'DIVIDEND_MATCH'}), on='ISIN', how='left')
+    summary_final = summary_final.merge(df_mv_ugl[['ISIN', 'MV_MATCH', 'UGL_MATCH']], on='ISIN', how='left')
+
+    # Filter for failures
+    summary_failures = summary_final[
+        (~summary_final['CLOSING_MATCH']) |
+        (~summary_final['BONUS_MATCH']) |
+        (~summary_final['DIVIDEND_MATCH']) |
+        (~summary_final['MV_MATCH']) |
+        (~summary_final['UGL_MATCH'])
+    ]
 
     output_dfs = {
         'Closing Units': df_closing,
         'Closing Amount': df_amount,
         'Bonus': df_bonus,
         'Dividend': df_dividend,
-        'Price_MV': df_price_mv,
-        'UGL': df_ugl
+        'MV_UGL': df_mv_ugl,
+        'Price_MV_Row': df_row_mv,
+        'Exception Summary': summary_failures
     }
 
-    return summary, output_dfs, df_exceptions
+    stats = {
+        'Total ISINs': len(shares_agg),
+        'Failed ISINs': len(summary_failures)
+    }
+
+    return stats, output_dfs, pd.DataFrame(exceptions)
 
 def generate_excel_report(output_dfs, df_exceptions):
-    """
-    Generates Excel report from dictionary of DataFrames.
-    """
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
@@ -394,11 +370,11 @@ def generate_excel_report(output_dfs, df_exceptions):
             if df is not None and not df.empty:
                 df.to_excel(writer, sheet_name=name, index=False)
                 worksheet = writer.sheets[name]
+                # Try to apply formats based on column names loosely
                 for i, col in enumerate(df.columns):
-                    if col == 'MV Diff %':
-                        worksheet.set_column(i, i, None, pct_fmt)
-                    elif 'Price' in col or 'MV' in col or 'Diff' in col or 'Amount' in col or 'UGL' in col or 'Units' in col:
-                        worksheet.set_column(i, i, None, num_fmt)
+                    if 'MATCH' in col or 'VALID' in col or 'ISIN' in col or 'CODE' in col:
+                        continue
+                    worksheet.set_column(i, i, None, num_fmt)
             else:
                 pd.DataFrame().to_excel(writer, sheet_name=name, index=False)
 
@@ -406,8 +382,9 @@ def generate_excel_report(output_dfs, df_exceptions):
         write(output_dfs.get('Closing Amount'), 'Closing Amount Verification')
         write(output_dfs.get('Bonus'), 'Bonus Verification')
         write(output_dfs.get('Dividend'), 'Dividend Working')
-        write(output_dfs.get('Price_MV'), 'Market Price & MV Verification')
-        write(output_dfs.get('UGL'), 'UGL Verification')
-        write(df_exceptions, 'Exception Report')
+        write(output_dfs.get('MV_UGL'), 'MV & UGL Verification')
+        write(output_dfs.get('Price_MV_Row'), 'Price & MV Row Check')
+        write(output_dfs.get('Exception Summary'), 'Exception Summary')
+        write(df_exceptions, 'Detailed Exceptions')
 
     return output.getvalue()
