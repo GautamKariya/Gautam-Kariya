@@ -143,14 +143,23 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
 
         expected_bonus = isin_bonus_map.get(isin, 0.0)
 
+        # Logic Change: Identify REIT by presence in Manual Map
+        is_reit = isin in manual_map
         manual = manual_map.get(isin)
-        is_reit = manual and manual['repay_rate'] > 0
+        repay_rate = manual['repay_rate'] if manual else 0.0
 
         if is_reit:
-            # REIT Logic: Closing = Opening + Purchase + Bonus (Ignore Sales Units, assume Repayment)
-            calc_closing = agg_opening + agg_purchase + expected_bonus
-            used_sales = 0
+            # REIT Logic
+            # If Repayment Rate > 0, assume Sales Units are Repayment Units (don't reduce holding)
+            # If Repayment Rate == 0, assume Sales Units are Real Sales (reduce holding)
+            if repay_rate > 0:
+                calc_closing = agg_opening + agg_purchase + expected_bonus
+                used_sales = 0
+            else:
+                calc_closing = agg_opening + agg_purchase + expected_bonus - agg_sales
+                used_sales = agg_sales
         else:
+            # Normal Equity: Always subtract Sales
             calc_closing = agg_opening + agg_purchase + expected_bonus - agg_sales
             used_sales = agg_sales
 
