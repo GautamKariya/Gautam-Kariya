@@ -54,9 +54,13 @@ def parse_shares_input(file_obj):
         ("BONUS_RECD", ["bonus"], []), # flexible for "Bonus Recd" or "Bonus Units"
         ("SALES_UNITS", ["sale", "units"], []), # matches "sales" or "sale"
 
-        # Closing Units vs Amount
         ("CLOSING_UNITS", ["closing", "units"], []),
-        ("CLOSING_AMOUNT", ["closing"], ["units"]), # Match closing if units is NOT present (Amount/Value)
+
+        # Closing Amount: Prioritize explicit Amount/Value, then fallback excluding Rate/Price
+        ("CLOSING_AMOUNT", ["closing", "amount"], []),
+        ("CLOSING_AMOUNT", ["closing", "value"], []),
+        ("CLOSING_AMOUNT", ["closing", "rs"], []),
+        ("CLOSING_AMOUNT", ["closing"], ["units", "rate", "price", "qty"]),
 
         ("MARKET_PRICE", ["mkt", "price"], []),
         ("MARKET_PRICE", ["market", "price"], []),
@@ -69,10 +73,27 @@ def parse_shares_input(file_obj):
 
         ("DIVIDEND_RECD", ["dividend"], []),
 
-        # Optional Amount columns for Closing Logic fallback/consistency
-        ("OPENING_AMOUNT", ["opening"], ["units"]),
-        ("PURCHASE_AMOUNT", ["purchase"], ["units"]),
-        ("SALES_AMOUNT", ["sale"], ["units"])
+        # Optional Amount columns with strict exclusions to avoid Rate/Price
+        # Opening
+        ("OPENING_AMOUNT", ["opening", "amount"], []),
+        ("OPENING_AMOUNT", ["opening", "value"], []),
+        ("OPENING_AMOUNT", ["opening", "cost"], []),
+        ("OPENING_AMOUNT", ["opening", "rs"], []),
+        ("OPENING_AMOUNT", ["opening"], ["units", "rate", "price", "qty", "no"]), # Fallback
+
+        # Purchase
+        ("PURCHASE_AMOUNT", ["purchase", "amount"], []),
+        ("PURCHASE_AMOUNT", ["purchase", "value"], []),
+        ("PURCHASE_AMOUNT", ["purchase", "cost"], []),
+        ("PURCHASE_AMOUNT", ["purchase", "rs"], []),
+        ("PURCHASE_AMOUNT", ["purchase"], ["units", "rate", "price", "qty", "no"]), # Fallback
+
+        # Sales
+        ("SALES_AMOUNT", ["sale", "amount"], []),
+        ("SALES_AMOUNT", ["sale", "value"], []),
+        ("SALES_AMOUNT", ["sale", "cost"], []),
+        ("SALES_AMOUNT", ["sale", "rs"], []),
+        ("SALES_AMOUNT", ["sale"], ["units", "rate", "price", "qty", "no"]) # Fallback
     ]
 
     # Normalize headers for matching
@@ -90,8 +111,6 @@ def parse_shares_input(file_obj):
     # Apply rules
     for internal_key, required_keywords, excluded_keywords in mapping_rules:
         # If we already found this internal key, skip (unless we want to overwrite, but first match is usually better if ordered correctly)
-        # However, our rules list has duplicates for OR logic (e.g. Market Price).
-        # We need to check if internal_key is already in found_map.values()
         if internal_key in found_map.values():
             continue
 
@@ -112,8 +131,6 @@ def parse_shares_input(file_obj):
         "ISIN", "SCRIPT_CODE",
         "OPENING_UNITS", "PURCHASE_UNITS", "BONUS_RECD", "SALES_UNITS", "CLOSING_UNITS",
         "CLOSING_AMOUNT", "UGL"
-        # Dividend is technically mandatory for logic but maybe not strictly for closing units?
-        # Requirement says "Verify Dividend", so yes.
     ]
 
     missing_keys = [key for key in mandatory_keys if key not in found_map.values()]
@@ -133,9 +150,6 @@ def parse_shares_input(file_obj):
         df_clean = df_clean[df_clean['ISIN'].str.len() > 5]
 
     # Filter out "Total" rows if Name column exists (or just based on ISIN validation)
-    # We can rely on ISIN filtering mostly, but let's check Name if mapped?
-    # We didn't map NAME explicitly in rules, let's add it.
-
     # Add Name mapping separately as it's loose
     if 'NAME' not in df_clean.columns:
         for col in df.columns:
@@ -167,7 +181,6 @@ def parse_shares_input(file_obj):
             df_clean[col] = pd.to_numeric(s, errors='coerce').fillna(0.0)
         else:
             # Create missing numeric columns as 0.0 (except mandatory ones which we checked)
-            # e.g. Market Price might be missing if mapping failed, but we want 0.0
             df_clean[col] = 0.0
 
     return df_clean, None
