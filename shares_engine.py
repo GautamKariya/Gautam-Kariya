@@ -104,6 +104,7 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
 
     # Manual Map
     manual_map = {}
+    reit_isins = set() # Set for fast lookup
     if manual_df is not None and not manual_df.empty:
         for _, row in manual_df.iterrows():
             isin_key = str(row.get('ISIN', '')).strip().upper()
@@ -112,12 +113,13 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
                     'div_rate': float(row.get('DIVIDEND RATE', 0.0) or 0.0),
                     'repay_rate': float(row.get('REPAYMENT RATE', 0.0) or 0.0)
                 }
+                reit_isins.add(isin_key)
 
     # --- 3. VERIFICATION MODULES (AGGREGATED) ---
 
     exceptions = []
 
-    # Pre-calculate Expected Bonus
+    # Pre-calculate Expected Bonus (for Bonus Verification check)
     isin_bonus_map = {}
     for _, row in shares_agg.iterrows():
         isin = row['ISIN']
@@ -140,27 +142,18 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         agg_opening = row['OPENING_UNITS']
         agg_purchase = row['PURCHASE_UNITS']
         agg_sales = row['SALES_UNITS']
+        agg_bonus = row['BONUS_RECD'] # Use INPUT BONUS for Closing Calculation (as per latest instruction)
 
-        expected_bonus = isin_bonus_map.get(isin, 0.0)
-
-        # Logic Change: Identify REIT by presence in Manual Map
-        is_reit = isin in manual_map
-        manual = manual_map.get(isin)
-        repay_rate = manual['repay_rate'] if manual else 0.0
+        # Check if REIT (Presence in Manual Map)
+        is_reit = isin in reit_isins
 
         if is_reit:
-            # REIT Logic
-            # If Repayment Rate > 0, assume Sales Units are Repayment Units (don't reduce holding)
-            # If Repayment Rate == 0, assume Sales Units are Real Sales (reduce holding)
-            if repay_rate > 0:
-                calc_closing = agg_opening + agg_purchase + expected_bonus
-                used_sales = 0
-            else:
-                calc_closing = agg_opening + agg_purchase + expected_bonus - agg_sales
-                used_sales = agg_sales
+            # REIT Rule: Open + Purchase + Bonus (Sales ignored)
+            calc_closing = agg_opening + agg_purchase + agg_bonus
+            used_sales = 0
         else:
-            # Normal Equity: Always subtract Sales
-            calc_closing = agg_opening + agg_purchase + expected_bonus - agg_sales
+            # Standard Rule: Open + Purchase + Bonus - Sales
+            calc_closing = agg_opening + agg_purchase + agg_bonus - agg_sales
             used_sales = agg_sales
 
         form_diff = agg_closing - calc_closing
@@ -249,7 +242,6 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         diff = inp_div - exp_div
         match = abs(diff) <= 2.0
 
-        # Calculate % Diff
         div_diff_pct = (diff / exp_div) if exp_div != 0 else 0.0
 
         res_dividend.append({
@@ -264,11 +256,11 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
     res_mv_ugl = []
     isin_expected_mv_map = {}
 
-    # Store aggregated row diffs for logging? No, summary sheet uses Aggregated data.
-    # Exception detail uses row-wise.
+    res_row_mv = []
 
     for idx, row in shares_df.iterrows():
         isin = str(row.get('ISIN', '')).strip()
+        script = str(row.get('SCRIPT_CODE', '')).strip()
 
         closing_units = row.get('CLOSING_UNITS', 0.0)
         input_price = row.get('MARKET_PRICE', 0.0)
@@ -279,10 +271,12 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
 
         bhav_price = bhav_map[isin]
 
+        price_diff = input_price - bhav_price
+        price_match = abs(price_diff) < 1.0
+
         expected_mv = closing_units * bhav_price
         isin_expected_mv_map[isin] = isin_expected_mv_map.get(isin, 0.0) + expected_mv
 
-        # Row-wise checks (for exception details only)
         mv_diff = input_mv - expected_mv
         mv_match = False
         if expected_mv != 0:
@@ -293,6 +287,12 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         if not mv_match:
              exceptions.append({'ISIN': isin, 'Module': 'Market Value', 'Match': False, 'Details': f"Row MV Mismatch"})
 
+        res_row_mv.append({
+            'ISIN': isin, 'SCRIPT_CODE': script,
+            'INPUT_PRICE': input_price, 'BHAV_PRICE': bhav_price, 'PRICE_MATCH': price_match,
+            'INPUT_MV': input_mv, 'EXPECTED_MV': expected_mv, 'MV_MATCH': mv_match
+        })
+
     # MODULE F: UGL (AGGREGATED)
     for _, row in shares_agg.iterrows():
         isin = row['ISIN']
@@ -302,7 +302,6 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
 
         agg_expected_mv = isin_expected_mv_map.get(isin, 0.0)
 
-        # MV Aggregated Calculations
         mv_diff = agg_expected_mv - agg_input_mv
         mv_diff_pct = (mv_diff / agg_expected_mv) if agg_expected_mv != 0 else 0.0
 
@@ -312,7 +311,6 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         else:
             if agg_input_mv == 0: mv_match = True
 
-        # UGL Calculation
         calc_ugl = agg_expected_mv - agg_closing_amt
         ugl_diff = calc_ugl - agg_input_ugl
         ugl_match = abs(ugl_diff) <= 2.0
@@ -335,11 +333,10 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
     df_bonus = pd.DataFrame(res_bonus)
     df_dividend = pd.DataFrame(res_dividend)
     df_mv_ugl = pd.DataFrame(res_mv_ugl)
+    df_row_mv = pd.DataFrame(res_row_mv)
 
-    # SHARES AUDIT SUMMARY
     summary_base = shares_agg[['ISIN', 'SCRIPT_CODE', 'NAME']].rename(columns={'NAME': 'INVESTMENT NAME', 'SCRIPT_CODE': 'SCRIPT CODE'})
 
-    # Merge Results
     summary_final = summary_base.merge(df_closing[['ISIN', 'PORT_MATCH']].rename(columns={'PORT_MATCH': 'CLOSING MATCH'}), on='ISIN', how='left')
     summary_final = summary_final.merge(df_bonus[['ISIN', 'MATCH']].rename(columns={'MATCH': 'BONUS MATCH'}), on='ISIN', how='left')
     summary_final = summary_final.merge(df_dividend[['ISIN', 'MATCH', 'DIFF', 'DIFF_%']].rename(columns={'MATCH': 'DIVIDEND MATCH', 'DIFF': 'DIVIDEND DIFF', 'DIFF_%': 'DIVIDEND DIFF %'}), on='ISIN', how='left')
@@ -349,7 +346,6 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         'UGL_DIFF': 'UGL DIFF', 'UGL_DIFF_%': 'UGL DIFF %'
     }), on='ISIN', how='left')
 
-    # Reorder Columns
     final_cols = [
         'INVESTMENT NAME', 'ISIN', 'SCRIPT CODE',
         'CLOSING MATCH', 'BONUS MATCH', 'DIVIDEND MATCH', 'MV MATCH', 'UGL MATCH',
@@ -363,21 +359,20 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         'Closing Amount': df_amount,
         'Bonus': df_bonus,
         'Dividend': df_dividend,
-        'MV_UGL': df_mv_ugl
+        'MV_UGL': df_mv_ugl,
+        'Price_MV_Row': df_row_mv,
+        'Exception Summary': summary_final[
+            (~summary_final['CLOSING MATCH']) |
+            (~summary_final['BONUS MATCH']) |
+            (~summary_final['DIVIDEND MATCH']) |
+            (~summary_final['MV MATCH']) |
+            (~summary_final['UGL MATCH'])
+        ]
     }
-
-    # Stats for UI
-    failed_rows = summary_final[
-        (~summary_final['CLOSING MATCH']) |
-        (~summary_final['BONUS MATCH']) |
-        (~summary_final['DIVIDEND MATCH']) |
-        (~summary_final['MV MATCH']) |
-        (~summary_final['UGL MATCH'])
-    ]
 
     stats = {
         'Total ISINs': len(shares_agg),
-        'Failed ISINs': len(failed_rows)
+        'Failed ISINs': len(output_dfs['Exception Summary'])
     }
 
     return stats, output_dfs, pd.DataFrame(exceptions)
@@ -408,6 +403,7 @@ def generate_excel_report(output_dfs, df_exceptions):
         write(output_dfs.get('Bonus'), 'Bonus Verification')
         write(output_dfs.get('Dividend'), 'Dividend Working')
         write(output_dfs.get('MV_UGL'), 'MV & UGL Verification')
+        write(output_dfs.get('Price_MV_Row'), 'Price & MV Row Check')
         write(df_exceptions, 'Detailed Exceptions')
 
     return output.getvalue()

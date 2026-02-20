@@ -1,14 +1,9 @@
 import pandas as pd
 import re
 
-def clean_column_name(col):
-    if not isinstance(col, str):
-        return ""
-    return re.sub(r'\s+', ' ', col).strip().lower()
-
 def parse_shares_input(file_obj):
     """
-    Parses the Shares Input Excel file.
+    Parses the Shares Input Excel file with STRICT column mapping.
     file_obj: UploadedFile object or file path.
     """
     try:
@@ -37,117 +32,115 @@ def parse_shares_input(file_obj):
 
     df = pd.read_excel(file_obj, header=header_row_idx)
 
-    found_cols = {}
+    # --- STRICT COLUMN MAPPING & CLEANING ---
+    # 1. Normalize Header: Strip spaces
+    df.columns = df.columns.str.strip()
 
-    for col in df.columns:
-        col_clean = clean_column_name(str(col))
+    # 2. Define Exact Mapping (File Header -> Internal Key)
+    # Internal Keys must match those used in shares_engine.py (Uppercase)
+    col_map = {
+        "ISIN": "ISIN",
+        "Script Code": "SCRIPT_CODE",
+        "Opening Units": "OPENING_UNITS",
+        "Purchase Units": "PURCHASE_UNITS",
+        "Bonus Units": "BONUS_RECD", # Mapped to BONUS_RECD
+        "Sales Units": "SALES_UNITS",
+        "Closing Units": "CLOSING_UNITS",
+        "Closing Amount": "CLOSING_AMOUNT",
+        "Dividend Received": "DIVIDEND_RECD",
+        "UN- Realised Gain/Loss": "UGL"
+    }
 
-        # Identity Columns
-        if 'script code' in col_clean:
-            found_cols['script_code'] = col
-        elif 'isin' in col_clean:
-            found_cols['isin'] = col
-        elif 'name of investment' in col_clean or 'scrip name' in col_clean:
-            found_cols['name'] = col
+    # 3. Add Optional/Extra columns if needed?
+    # Market Value and Market Price are needed for other modules.
+    # User didn't list them in "EXACT COLUMN NAMES" list for Closing Unit logic, but engine needs them.
+    # Assuming standard names or similar:
+    # "Mkt Value ..." -> MARKET_VALUE
+    # "MKT PRICE ..." -> MARKET_PRICE
+    # I'll keep the previous flexible logic for these non-strict columns, or look for exacts?
+    # User said "The Shares.xlsx input file structure is FIXED."
+    # But only listed the columns relevant to the failure (Units/UGL).
+    # I will look for Market Price/Value flexibly to ensure engine doesn't break.
 
-        # Opening
-        elif 'opening' in col_clean:
-            if 'amount' in col_clean or 'value' in col_clean:
-                found_cols['opening_amount'] = col
-            elif 'units' in col_clean or 'qty' in col_clean or 'balance' in col_clean:
-                found_cols['opening_units'] = col
+    # Apply Strict Mapping
+    found_map = {}
+    missing = []
 
-        # Purchase
-        elif 'purchase' in col_clean:
-            if 'amount' in col_clean or 'value' in col_clean:
-                found_cols['purchase_amount'] = col
-            elif 'units' in col_clean or 'qty' in col_clean:
-                found_cols['purchase_units'] = col
+    for file_col, internal_col in col_map.items():
+        if file_col in df.columns:
+            found_map[file_col] = internal_col
+        else:
+            # Fallback for "UN- Realised Gain/Loss" spacing variations?
+            # User said: "Match keywords... OR simply match 'UN- Realised Gain/Loss'... Case sensitive after normalization."
+            # "UN- Realised Gain/Loss" is the target.
+            missing.append(file_col)
 
-        # Sales
-        elif 'sale' in col_clean: # sale or sales
-            if 'amount' in col_clean or 'value' in col_clean:
-                found_cols['sales_amount'] = col
-            elif 'units' in col_clean or 'qty' in col_clean:
-                found_cols['sales_units'] = col
-
-        # Bonus
-        elif 'bonus' in col_clean:
-            if 'recd' in col_clean or 'units' in col_clean:
-                found_cols['bonus_recd'] = col
-
-        # Closing
-        elif 'closing' in col_clean:
-            if 'amount' in col_clean or 'value' in col_clean:
-                found_cols['closing_amount'] = col
-            elif 'units' in col_clean or 'qty' in col_clean:
-                found_cols['closing_units'] = col
-            else:
-                if 'closing_units' not in found_cols:
-                    found_cols['closing_units'] = col
-
-        # Dividend
-        elif 'dividend' in col_clean or 'div recd' in col_clean:
-            found_cols['dividend_recd'] = col
-
-        # Market Price
-        elif 'mkt price' in col_clean or 'market price' in col_clean:
-            found_cols['market_price'] = col
-
-        # Market Value
-        elif 'mkt value' in col_clean or 'market value' in col_clean:
-            found_cols['market_value'] = col
-
-        # UGL - Correct Column Detection
-        # Match keywords: "un" AND "realised" (or realized) AND "gain"
-        # Or "un-realised"
-        if ('un' in col_clean and 'realised' in col_clean and 'gain' in col_clean) or \
-           ('un' in col_clean and 'realized' in col_clean and 'gain' in col_clean) or \
-           ('un-realised' in col_clean) or \
-           ('unrealised' in col_clean and 'gain' in col_clean):
-            found_cols['ugl'] = col
-
-    # Check mandatory columns
-    # UGL is mandatory for UGL verification, but user said "throw error" if conversion fails or column not found.
-    # We will check mandatory fields here.
-    missing = [k for k in ['script_code', 'isin', 'opening_units', 'closing_units'] if k not in found_cols]
     if missing:
-        return None, f"Missing columns: {', '.join(missing)}"
+        return None, f"Missing mandatory columns (Exact Match): {', '.join(missing)}"
 
-    # Check UGL specifically to warn
-    if 'ugl' not in found_cols:
-        return None, "UN- Realised Gain/Loss column not detected in input file."
+    # Rename Strict Columns
+    df_clean = df.rename(columns=found_map)
 
-    # Select and Rename
-    df_clean = df[list(found_cols.values())].copy()
-    df_clean.columns = list(found_cols.keys())
+    # 4. Handle other columns (Market Price, Market Value, Opening/Purchase/Sales Amount) flexibly
+    # We need these for full engine function.
+    # Strategy: Scan remaining columns for keywords and map to internal keys IF NOT ALREADY MAPPED.
 
-    # Filter Rows
-    if 'isin' in df_clean.columns:
-        df_clean['isin'] = df_clean['isin'].astype(str).str.strip().str.upper()
-        df_clean = df_clean.dropna(subset=['isin'])
-        # No prefix filter (process all)
+    remaining_cols = [c for c in df.columns if c not in found_map]
+    flexible_map = {}
 
-    if 'name' in df_clean.columns:
-        df_clean = df_clean[~df_clean['name'].astype(str).str.contains('total', case=False, na=False)]
+    for col in remaining_cols:
+        col_clean = str(col).strip().lower()
 
-    # Standardize Numerics
-    all_numeric_cols = [
-        'opening_units', 'opening_amount',
-        'purchase_units', 'purchase_amount',
-        'sales_units', 'sales_amount',
-        'bonus_recd',
-        'closing_units', 'closing_amount',
-        'market_price', 'market_value', 'ugl', 'dividend_recd'
+        if 'mkt price' in col_clean or 'market price' in col_clean:
+            flexible_map[col] = 'MARKET_PRICE'
+        elif 'mkt value' in col_clean or 'market value' in col_clean:
+            flexible_map[col] = 'MARKET_VALUE'
+        elif 'opening' in col_clean and ('amount' in col_clean or 'value' in col_clean):
+            flexible_map[col] = 'OPENING_AMOUNT'
+        elif 'purchase' in col_clean and ('amount' in col_clean or 'value' in col_clean):
+            flexible_map[col] = 'PURCHASE_AMOUNT'
+        elif 'sale' in col_clean and ('amount' in col_clean or 'value' in col_clean):
+            flexible_map[col] = 'SALES_AMOUNT'
+
+    df_clean = df_clean.rename(columns=flexible_map)
+
+    # 5. Filter ISIN
+    if 'ISIN' in df_clean.columns:
+        df_clean['ISIN'] = df_clean['ISIN'].astype(str).str.strip().str.upper()
+        df_clean = df_clean.dropna(subset=['ISIN'])
+
+    # 6. Exclude Total
+    if 'NAME' in df_clean.columns: # Wait, Name column?
+        # User didn't specify Name column in strict list.
+        # But engine uses 'NAME'.
+        # Usually "Name of Investment" or "Scrip Name".
+        pass
+
+    # Try to find Name column if not in strict list
+    if 'NAME' not in df_clean.columns:
+        for col in df.columns:
+            if 'name' in str(col).lower() and 'investment' in str(col).lower():
+                df_clean[col] = df[col] # Copy over
+                df_clean = df_clean.rename(columns={col: 'NAME'})
+                break
+
+    if 'NAME' in df_clean.columns:
+        df_clean = df_clean[~df_clean['NAME'].astype(str).str.contains('total', case=False, na=False)]
+
+    # 7. Numeric Conversion (Strict & Robust)
+    numeric_cols = [
+        'OPENING_UNITS', 'PURCHASE_UNITS', 'BONUS_RECD', 'SALES_UNITS', 'CLOSING_UNITS',
+        'CLOSING_AMOUNT', 'DIVIDEND_RECD', 'UGL',
+        'MARKET_VALUE', 'MARKET_PRICE', 'OPENING_AMOUNT', 'PURCHASE_AMOUNT', 'SALES_AMOUNT'
     ]
 
-    for col in all_numeric_cols:
+    for col in numeric_cols:
         if col not in df_clean.columns:
             df_clean[col] = 0.0
         else:
-             s = df_clean[col].astype(str)
-             s = s.str.replace(',', '').str.replace(' ', '')
-             s = pd.to_numeric(s, errors='coerce').fillna(0.0)
-             df_clean[col] = s
+            s = df_clean[col].astype(str)
+            s = s.str.replace(',', '').str.strip()
+            # Coerce to numeric, fill NaN with 0
+            df_clean[col] = pd.to_numeric(s, errors='coerce').fillna(0.0)
 
     return df_clean, None
