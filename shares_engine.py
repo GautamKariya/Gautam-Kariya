@@ -147,6 +147,7 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         is_reit = manual and manual['repay_rate'] > 0
 
         if is_reit:
+            # REIT Logic: Closing = Opening + Purchase + Bonus (Ignore Sales Units, assume Repayment)
             calc_closing = agg_opening + agg_purchase + expected_bonus
             used_sales = 0
         else:
@@ -293,20 +294,8 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
         agg_expected_mv = isin_expected_mv_map.get(isin, 0.0)
 
         # MV Aggregated Calculations
-        mv_diff = agg_expected_mv - agg_input_mv # Diff = Expected - Input? User said MV Diff = Expected - Input in prompt?
-        # Prompt: "MV Diff % = (MV Diff / Expected MV)". Usually Diff = Input - Expected (Variance).
-        # Let's assume Diff = Input - Expected to show over/understatement?
-        # Prompt said: "MV Diff = Expected MV - Input MV". Okay.
-
         mv_diff = agg_expected_mv - agg_input_mv
         mv_diff_pct = (mv_diff / agg_expected_mv) if agg_expected_mv != 0 else 0.0
-
-        # MV Match Logic (Aggregated for Summary)
-        # Tolerance applied to % logic in previous steps (<= 1%).
-        # But Prompt 9 says "Tolerance Rule (Global): ABS(Diff) <= 2 -> Match."
-        # "No other tolerance allowed unless explicitly coded."
-        # But Prompt 2 says "MV Match = True if ... (implied 1% or whatever previous logic)".
-        # Let's keep the existing 1% logic for MV as it's valuation.
 
         mv_match = False
         if agg_expected_mv != 0:
@@ -339,8 +328,6 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
     df_mv_ugl = pd.DataFrame(res_mv_ugl)
 
     # SHARES AUDIT SUMMARY
-    # Columns: Investment Name | ISIN | Script Code | Closing Match | Bonus Match | Dividend Match | MV Match | UGL Match | MV Diff | MV Diff % | UGL Diff | UGL Diff % | Dividend Diff | Dividend Diff %
-
     summary_base = shares_agg[['ISIN', 'SCRIPT_CODE', 'NAME']].rename(columns={'NAME': 'INVESTMENT NAME', 'SCRIPT_CODE': 'SCRIPT CODE'})
 
     # Merge Results
@@ -371,7 +358,6 @@ def run_verification(shares_df, portfolio_df, corp_action_df, bhav_copy_df, manu
     }
 
     # Stats for UI
-    # Count failed rows in summary
     failed_rows = summary_final[
         (~summary_final['CLOSING MATCH']) |
         (~summary_final['BONUS MATCH']) |
@@ -402,13 +388,11 @@ def generate_excel_report(output_dfs, df_exceptions):
                     if '%' in col:
                         worksheet.set_column(i, i, None, pct_fmt)
                     elif any(k in col for k in ['DIFF', 'AMOUNT', 'VALUE', 'PRICE', 'DIVIDEND', 'UGL', 'EXP', 'INP', 'CALC']):
-                        # Apply numeric format to non-boolean, non-id columns
                         if 'MATCH' not in col and 'ISIN' not in col and 'CODE' not in col and 'NAME' not in col:
                             worksheet.set_column(i, i, None, num_fmt)
             else:
                 pd.DataFrame().to_excel(writer, sheet_name=name, index=False)
 
-        # Order matters
         write(output_dfs.get('SHARES AUDIT SUMMARY'), 'SHARES AUDIT SUMMARY')
         write(output_dfs.get('Closing Units'), 'Closing Units Verification')
         write(output_dfs.get('Closing Amount'), 'Closing Amount Verification')
