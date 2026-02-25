@@ -1,2 +1,8 @@
-requests
-tqdm
+streamlit
+pandas
+beautifulsoup4
+lxml
+openpyxl
+xlrd
+fuzzywuzzy
+python-Levenshtein
